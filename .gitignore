@@ -1,0 +1,7 @@
+/target/
+/temp/
+/third_party/
+/ui3/
+*.pdb
+/dist/
+/.playwright-mcp/

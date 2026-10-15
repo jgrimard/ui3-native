@@ -1,0 +1,19 @@
+[package]
+name = "bi-mock"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Offline mock Blue Iris server for UI3 Native development (serves synthetic H.264/H.265 streams)"
+
+[dependencies]
+bi-proto.workspace = true
+bi-media.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+md-5.workspace = true
+futures-util.workspace = true
+axum = "0.8"
+tokio-stream = "0.1"
+chrono.workspace = true

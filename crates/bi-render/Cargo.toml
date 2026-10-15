@@ -1,0 +1,17 @@
+[package]
+name = "bi-render"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "wgpu NV12 video renderer for egui"
+
+[dependencies]
+egui.workspace = true
+egui-wgpu.workspace = true
+wgpu.workspace = true
+bi-media.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi_Common"] }

@@ -1,0 +1,3 @@
+[env]
+FFMPEG_DIR = { value = "third_party/ffmpeg", relative = true }
+LIBCLANG_PATH = { value = "third_party/libclang", relative = true }

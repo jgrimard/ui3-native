@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = ["crates/bi-proto", "crates/bi-media", "crates/bi-render", "app", "tools/bi-capture", "tools/bi-mock"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "LGPL-3.0-only"
+
+[workspace.dependencies]
+bi-proto = { path = "crates/bi-proto" }
+bi-media = { path = "crates/bi-media" }
+bi-render = { path = "crates/bi-render" }
+anyhow = "1"
+thiserror = "2"
+bytes = "1"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream", "json", "cookies", "native-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+md-5 = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "persistence"] }
+egui = "0.36"
+egui-wgpu = "0.36"
+egui_extras = { version = "0.36", features = ["image", "datepicker", "serde", "svg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+wgpu = "30"
+ffmpeg-sys-next = { version = "9.0.1", default-features = false, features = ["avcodec", "avformat", "swresample", "swscale"] }
+cpal = "0.18"
+rtrb = "0.4"
+zune-jpeg = "0.5"
+windows = "0.62"
+lru = "0.18"
+directories = "6"
+rfd = "0.17"
+gilrs = "0.11"
+rumqttc = { version = "0.25", default-features = false, features = ["websocket", "url"] }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

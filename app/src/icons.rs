@@ -1,0 +1,132 @@
+//! UI3's icon set (generated from ui3/ui3/icons.svg by tools/gen/gen_icons.py — do not edit).
+
+#![allow(dead_code)]
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Icon {
+    pub name: &'static str,
+    pub svg: &'static [u8],
+    /// Width / height of the icon's view box.
+    pub aspect: f32,
+}
+
+pub const ABOUT: Icon = Icon { name: "About", svg: include_bytes!("../assets/icons/About.svg"), aspect: 0.9797 };
+pub const ALERT: Icon = Icon { name: "Alert", svg: include_bytes!("../assets/icons/Alert.svg"), aspect: 1.0 };
+pub const ALERT1: Icon = Icon { name: "Alert1", svg: include_bytes!("../assets/icons/Alert1.svg"), aspect: 0.457 };
+pub const ALERT2: Icon = Icon { name: "Alert2", svg: include_bytes!("../assets/icons/Alert2.svg"), aspect: 0.9998 };
+pub const CALENDAR: Icon = Icon { name: "Calendar", svg: include_bytes!("../assets/icons/Calendar.svg"), aspect: 0.9167 };
+pub const CALENDAR2: Icon = Icon { name: "Calendar2", svg: include_bytes!("../assets/icons/Calendar2.svg"), aspect: 0.9982 };
+pub const DOWN_ARROW: Icon = Icon { name: "DownArrow", svg: include_bytes!("../assets/icons/DownArrow.svg"), aspect: 1.667 };
+pub const DOWNLOAD: Icon = Icon { name: "Download", svg: include_bytes!("../assets/icons/Download.svg"), aspect: 1.002 };
+pub const ERROR: Icon = Icon { name: "Error", svg: include_bytes!("../assets/icons/Error.svg"), aspect: 1.0 };
+pub const FLAG: Icon = Icon { name: "Flag", svg: include_bytes!("../assets/icons/Flag.svg"), aspect: 0.9167 };
+pub const FULL_CAMERA_LIST: Icon = Icon { name: "FullCameraList", svg: include_bytes!("../assets/icons/FullCameraList.svg"), aspect: 1.002 };
+pub const HOLD_PROFILE: Icon = Icon { name: "HoldProfile", svg: include_bytes!("../assets/icons/HoldProfile.svg"), aspect: 1.0 };
+pub const INFO: Icon = Icon { name: "Info", svg: include_bytes!("../assets/icons/Info.svg"), aspect: 1.0 };
+pub const INFORMATION: Icon = Icon { name: "Information", svg: include_bytes!("../assets/icons/Information.svg"), aspect: 1.0 };
+pub const LOGOUT: Icon = Icon { name: "Logout", svg: include_bytes!("../assets/icons/Logout.svg"), aspect: 0.875 };
+pub const LOOPING: Icon = Icon { name: "Looping", svg: include_bytes!("../assets/icons/Looping.svg"), aspect: 1.1 };
+pub const MENU: Icon = Icon { name: "Menu", svg: include_bytes!("../assets/icons/Menu.svg"), aspect: 0.2583 };
+pub const OK: Icon = Icon { name: "OK", svg: include_bytes!("../assets/icons/OK.svg"), aspect: 1.0 };
+pub const PTZBACKGROUND: Icon = Icon { name: "PTZbackground", svg: include_bytes!("../assets/icons/PTZbackground.svg"), aspect: 1.0 };
+pub const PTZCARDINAL_DOWN: Icon = Icon { name: "PTZcardinalDown", svg: include_bytes!("../assets/icons/PTZcardinalDown.svg"), aspect: 1.622 };
+pub const PTZCARDINAL_LEFT: Icon = Icon { name: "PTZcardinalLeft", svg: include_bytes!("../assets/icons/PTZcardinalLeft.svg"), aspect: 0.6164 };
+pub const PTZCARDINAL_RIGHT: Icon = Icon { name: "PTZcardinalRight", svg: include_bytes!("../assets/icons/PTZcardinalRight.svg"), aspect: 0.6164 };
+pub const PTZCARDINAL_UP: Icon = Icon { name: "PTZcardinalUp", svg: include_bytes!("../assets/icons/PTZcardinalUp.svg"), aspect: 1.622 };
+pub const PTZFOCUS_SMALL: Icon = Icon { name: "PTZfocusSmall", svg: include_bytes!("../assets/icons/PTZfocusSmall.svg"), aspect: 0.4567 };
+pub const PTZFOCUS_LARGE: Icon = Icon { name: "PTZfocusLarge", svg: include_bytes!("../assets/icons/PTZfocusLarge.svg"), aspect: 0.4567 };
+pub const PTZORDINAL_NE: Icon = Icon { name: "PTZordinalNE", svg: include_bytes!("../assets/icons/PTZordinalNE.svg"), aspect: 1.0 };
+pub const PTZORDINAL_NW: Icon = Icon { name: "PTZordinalNW", svg: include_bytes!("../assets/icons/PTZordinalNW.svg"), aspect: 1.0 };
+pub const PTZORDINAL_SE: Icon = Icon { name: "PTZordinalSE", svg: include_bytes!("../assets/icons/PTZordinalSE.svg"), aspect: 1.0 };
+pub const PTZORDINAL_SW: Icon = Icon { name: "PTZordinalSW", svg: include_bytes!("../assets/icons/PTZordinalSW.svg"), aspect: 1.0 };
+pub const PTZOUTSIDE_RING: Icon = Icon { name: "PTZoutsideRing", svg: include_bytes!("../assets/icons/PTZoutsideRing.svg"), aspect: 1.0 };
+pub const PTZSTOP: Icon = Icon { name: "PTZstop", svg: include_bytes!("../assets/icons/PTZstop.svg"), aspect: 1.0 };
+pub const PTZZOOM_IN: Icon = Icon { name: "PTZzoomIn", svg: include_bytes!("../assets/icons/PTZzoomIn.svg"), aspect: 2.189 };
+pub const PTZZOOM_OUT: Icon = Icon { name: "PTZzoomOut", svg: include_bytes!("../assets/icons/PTZzoomOut.svg"), aspect: 2.189 };
+pub const PTZPLUS: Icon = Icon { name: "PTZplus", svg: include_bytes!("../assets/icons/PTZplus.svg"), aspect: 1.0 };
+pub const PTZMINUS: Icon = Icon { name: "PTZminus", svg: include_bytes!("../assets/icons/PTZminus.svg"), aspect: 3.667 };
+pub const PTZFOCUS_EYE_LARGE: Icon = Icon { name: "PTZfocusEyeLarge", svg: include_bytes!("../assets/icons/PTZfocusEyeLarge.svg"), aspect: 1.57 };
+pub const PTZFOCUS_EYE_SMALL: Icon = Icon { name: "PTZfocusEyeSmall", svg: include_bytes!("../assets/icons/PTZfocusEyeSmall.svg"), aspect: 1.57 };
+pub const PTZSQUARE: Icon = Icon { name: "PTZsquare", svg: include_bytes!("../assets/icons/PTZsquare.svg"), aspect: 1.0 };
+pub const PAUSE: Icon = Icon { name: "Pause", svg: include_bytes!("../assets/icons/Pause.svg"), aspect: 1.0 };
+pub const PLAY: Icon = Icon { name: "Play", svg: include_bytes!("../assets/icons/Play.svg"), aspect: 0.8661 };
+pub const RESTART: Icon = Icon { name: "Restart", svg: include_bytes!("../assets/icons/Restart.svg"), aspect: 1.0 };
+pub const RUN_PROFILE: Icon = Icon { name: "RunProfile", svg: include_bytes!("../assets/icons/RunProfile.svg"), aspect: 1.0 };
+pub const SETTINGS: Icon = Icon { name: "Settings", svg: include_bytes!("../assets/icons/Settings.svg"), aspect: 1.0 };
+pub const SKIP_BACK: Icon = Icon { name: "SkipBack", svg: include_bytes!("../assets/icons/SkipBack.svg"), aspect: 1.083 };
+pub const SKIP_FORWARD: Icon = Icon { name: "SkipForward", svg: include_bytes!("../assets/icons/SkipForward.svg"), aspect: 1.083 };
+pub const SNAPSHOT: Icon = Icon { name: "Snapshot", svg: include_bytes!("../assets/icons/Snapshot.svg"), aspect: 1.25 };
+pub const STOPLIGHT: Icon = Icon { name: "Stoplight", svg: include_bytes!("../assets/icons/Stoplight.svg"), aspect: 1.0 };
+pub const SYSTEM_CONFIGURATION: Icon = Icon { name: "SystemConfiguration", svg: include_bytes!("../assets/icons/SystemConfiguration.svg"), aspect: 0.9982 };
+pub const SYSTEM_LOG: Icon = Icon { name: "SystemLog", svg: include_bytes!("../assets/icons/SystemLog.svg"), aspect: 0.9477 };
+pub const SYSTEM_LOG2: Icon = Icon { name: "SystemLog2", svg: include_bytes!("../assets/icons/SystemLog2.svg"), aspect: 0.9014 };
+pub const TEMP_PROFILE: Icon = Icon { name: "TempProfile", svg: include_bytes!("../assets/icons/TempProfile.svg"), aspect: 1.0 };
+pub const USER: Icon = Icon { name: "User", svg: include_bytes!("../assets/icons/User.svg"), aspect: 1.0 };
+pub const VIEWDETAILS: Icon = Icon { name: "Viewdetails", svg: include_bytes!("../assets/icons/Viewdetails.svg"), aspect: 0.8006 };
+pub const VOLUME: Icon = Icon { name: "Volume", svg: include_bytes!("../assets/icons/Volume.svg"), aspect: 1.089 };
+pub const WARNING: Icon = Icon { name: "Warning", svg: include_bytes!("../assets/icons/Warning.svg"), aspect: 1.0 };
+pub const VIEW_STREAM: Icon = Icon { name: "ViewStream", svg: include_bytes!("../assets/icons/ViewStream.svg"), aspect: 1.0 };
+pub const VIDEO_FILTER: Icon = Icon { name: "VideoFilter", svg: include_bytes!("../assets/icons/VideoFilter.svg"), aspect: 1.0 };
+pub const TRASH: Icon = Icon { name: "Trash", svg: include_bytes!("../assets/icons/Trash.svg"), aspect: 1.0 };
+pub const FULLSCREEN: Icon = Icon { name: "Fullscreen", svg: include_bytes!("../assets/icons/Fullscreen.svg"), aspect: 1.0 };
+pub const FULLSCREEN_EXIT: Icon = Icon { name: "FullscreenExit", svg: include_bytes!("../assets/icons/FullscreenExit.svg"), aspect: 1.0 };
+pub const TAB: Icon = Icon { name: "Tab", svg: include_bytes!("../assets/icons/Tab.svg"), aspect: 1.0 };
+pub const REFRESH: Icon = Icon { name: "Refresh", svg: include_bytes!("../assets/icons/Refresh.svg"), aspect: 1.0 };
+pub const CLOSE_BTN: Icon = Icon { name: "closeBtn", svg: include_bytes!("../assets/icons/closeBtn.svg"), aspect: 1.0 };
+pub const LOADING_CIRCLE: Icon = Icon { name: "loading_circle", svg: include_bytes!("../assets/icons/loading_circle.svg"), aspect: 1.0 };
+pub const DEVICE_INFO: Icon = Icon { name: "deviceInfo", svg: include_bytes!("../assets/icons/deviceInfo.svg"), aspect: 1.0 };
+pub const COPY: Icon = Icon { name: "copy", svg: include_bytes!("../assets/icons/copy.svg"), aspect: 1.0 };
+pub const VOLUME_OFF: Icon = Icon { name: "volumeOff", svg: include_bytes!("../assets/icons/volumeOff.svg"), aspect: 1.0 };
+pub const VOLUME_MUTE: Icon = Icon { name: "volumeMute", svg: include_bytes!("../assets/icons/volumeMute.svg"), aspect: 1.0 };
+pub const VOLUME_DOWN: Icon = Icon { name: "volumeDown", svg: include_bytes!("../assets/icons/volumeDown.svg"), aspect: 1.0 };
+pub const VOLUME_UP: Icon = Icon { name: "volumeUp", svg: include_bytes!("../assets/icons/volumeUp.svg"), aspect: 1.0 };
+pub const CB_UNCHECKED: Icon = Icon { name: "cbUnchecked", svg: include_bytes!("../assets/icons/cbUnchecked.svg"), aspect: 1.0 };
+pub const CB_CHECKED: Icon = Icon { name: "cbChecked", svg: include_bytes!("../assets/icons/cbChecked.svg"), aspect: 1.0 };
+pub const CB_MINUS: Icon = Icon { name: "cbMinus", svg: include_bytes!("../assets/icons/cbMinus.svg"), aspect: 1.0 };
+pub const CB_PLUS: Icon = Icon { name: "cbPlus", svg: include_bytes!("../assets/icons/cbPlus.svg"), aspect: 1.0 };
+pub const IMAGE_LARGER: Icon = Icon { name: "imageLarger", svg: include_bytes!("../assets/icons/imageLarger.svg"), aspect: 1.0 };
+pub const RUN: Icon = Icon { name: "run", svg: include_bytes!("../assets/icons/run.svg"), aspect: 1.0 };
+pub const QUILT: Icon = Icon { name: "quilt", svg: include_bytes!("../assets/icons/quilt.svg"), aspect: 1.0 };
+pub const CLOUD_UPLOADING: Icon = Icon { name: "cloudUploading", svg: include_bytes!("../assets/icons/cloudUploading.svg"), aspect: 1.0 };
+pub const CLOUD_UPLOADED: Icon = Icon { name: "cloudUploaded", svg: include_bytes!("../assets/icons/cloudUploaded.svg"), aspect: 1.0 };
+pub const LOCK: Icon = Icon { name: "lock", svg: include_bytes!("../assets/icons/lock.svg"), aspect: 0.9524 };
+pub const HELP: Icon = Icon { name: "help", svg: include_bytes!("../assets/icons/help.svg"), aspect: 1.0 };
+pub const CONTRAST: Icon = Icon { name: "contrast", svg: include_bytes!("../assets/icons/contrast.svg"), aspect: 1.0 };
+pub const LIGHTBULB: Icon = Icon { name: "lightbulb", svg: include_bytes!("../assets/icons/lightbulb.svg"), aspect: 1.0 };
+pub const BRIGHTNESS: Icon = Icon { name: "brightness", svg: include_bytes!("../assets/icons/brightness.svg"), aspect: 1.0 };
+pub const REPLAY: Icon = Icon { name: "replay", svg: include_bytes!("../assets/icons/replay.svg"), aspect: 1.0 };
+pub const POPOUT: Icon = Icon { name: "popout", svg: include_bytes!("../assets/icons/popout.svg"), aspect: 1.0 };
+pub const EDIT: Icon = Icon { name: "edit", svg: include_bytes!("../assets/icons/edit.svg"), aspect: 1.0 };
+pub const CLOCK: Icon = Icon { name: "clock", svg: include_bytes!("../assets/icons/clock.svg"), aspect: 1.0 };
+pub const MAXIMIZE: Icon = Icon { name: "maximize", svg: include_bytes!("../assets/icons/maximize.svg"), aspect: 1.0 };
+pub const STORAGE: Icon = Icon { name: "storage", svg: include_bytes!("../assets/icons/storage.svg"), aspect: 1.0 };
+pub const FOLDER: Icon = Icon { name: "folder", svg: include_bytes!("../assets/icons/folder.svg"), aspect: 1.0 };
+pub const LAUNCH: Icon = Icon { name: "launch", svg: include_bytes!("../assets/icons/launch.svg"), aspect: 1.0 };
+pub const FOLDER_SPECIAL: Icon = Icon { name: "folder_special", svg: include_bytes!("../assets/icons/folder_special.svg"), aspect: 1.0 };
+pub const CROP: Icon = Icon { name: "crop", svg: include_bytes!("../assets/icons/crop.svg"), aspect: 1.0 };
+pub const STAR: Icon = Icon { name: "star", svg: include_bytes!("../assets/icons/star.svg"), aspect: 1.0 };
+pub const EXPAND: Icon = Icon { name: "expand", svg: include_bytes!("../assets/icons/expand.svg"), aspect: 1.0 };
+pub const COLLAPSE: Icon = Icon { name: "collapse", svg: include_bytes!("../assets/icons/collapse.svg"), aspect: 1.0 };
+pub const SHIELD: Icon = Icon { name: "shield", svg: include_bytes!("../assets/icons/shield.svg"), aspect: 1.0 };
+pub const PIP: Icon = Icon { name: "pip", svg: include_bytes!("../assets/icons/pip.svg"), aspect: 1.0 };
+pub const APPS: Icon = Icon { name: "apps", svg: include_bytes!("../assets/icons/apps.svg"), aspect: 1.0 };
+pub const VIDEOCAM: Icon = Icon { name: "videocam", svg: include_bytes!("../assets/icons/videocam.svg"), aspect: 1.0 };
+pub const HOME: Icon = Icon { name: "home", svg: include_bytes!("../assets/icons/home.svg"), aspect: 1.0 };
+pub const HIDE_IMAGE: Icon = Icon { name: "hide_image", svg: include_bytes!("../assets/icons/hide_image.svg"), aspect: 1.0 };
+pub const BOLT: Icon = Icon { name: "bolt", svg: include_bytes!("../assets/icons/bolt.svg"), aspect: 1.0 };
+pub const PENDING: Icon = Icon { name: "pending", svg: include_bytes!("../assets/icons/pending.svg"), aspect: 1.0 };
+pub const ELLIPSIS: Icon = Icon { name: "ellipsis", svg: include_bytes!("../assets/icons/ellipsis.svg"), aspect: 1.0 };
+pub const ZOOM_IN_CROP: Icon = Icon { name: "zoom_in_crop", svg: include_bytes!("../assets/icons/zoom_in_crop.svg"), aspect: 1.0 };
+pub const ZOOM_OUT_CROP: Icon = Icon { name: "zoom_out_crop", svg: include_bytes!("../assets/icons/zoom_out_crop.svg"), aspect: 1.0 };
+pub const MAN: Icon = Icon { name: "man", svg: include_bytes!("../assets/icons/man.svg"), aspect: 1.0 };
+pub const DIRECTIONS_CAR: Icon = Icon { name: "directions_car", svg: include_bytes!("../assets/icons/directions_car.svg"), aspect: 1.0 };
+pub const AUTO_MAXIMIZE: Icon = Icon { name: "auto_maximize", svg: include_bytes!("../assets/icons/auto_maximize.svg"), aspect: 1.0 };
+pub const SQUARE: Icon = Icon { name: "square", svg: include_bytes!("../assets/icons/square.svg"), aspect: 1.0 };
+pub const SEARCH: Icon = Icon { name: "search", svg: include_bytes!("../assets/icons/search.svg"), aspect: 1.0 };
+pub const VIEW_SIDEBAR: Icon = Icon { name: "view_sidebar", svg: include_bytes!("../assets/icons/view_sidebar.svg"), aspect: 1.0 };
+pub const SIDEBAR_HIDDEN: Icon = Icon { name: "sidebar_hidden", svg: include_bytes!("../assets/icons/sidebar_hidden.svg"), aspect: 0.8333 };
+pub const GAMEPAD: Icon = Icon { name: "gamepad", svg: include_bytes!("../assets/icons/gamepad.svg"), aspect: 1.0 };
+pub const WILDLIFE: Icon = Icon { name: "wildlife", svg: include_bytes!("../assets/icons/wildlife.svg"), aspect: 1.0 };
+pub const UPDATE: Icon = Icon { name: "update", svg: include_bytes!("../assets/icons/update.svg"), aspect: 1.0 };
+pub const VISIBILITY: Icon = Icon { name: "visibility", svg: include_bytes!("../assets/icons/visibility.svg"), aspect: 1.0 };
+pub const VISIBILITY_OFF: Icon = Icon { name: "visibility_off", svg: include_bytes!("../assets/icons/visibility_off.svg"), aspect: 1.0 };
