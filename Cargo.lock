@@ -539,7 +539,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bi-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bi-proto",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "bi-media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bi-proto",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "bi-mock"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "bi-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "bi-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bi-media",
  "egui",
@@ -5025,7 +5025,7 @@ dependencies = [
 
 [[package]]
 name = "ui3-native"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bi-media",
