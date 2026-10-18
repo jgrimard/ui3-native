@@ -247,9 +247,12 @@ impl Settings {
         p
     }
 
-    /// Profile for recorded playback (clips, timeline). Blue Iris always transcodes recordings, so direct-to-wire
-    /// does not apply; a direct-to-wire profile keeps its size but leaves the quality to Blue Iris instead of the
-    /// Default Video Quality, which at high values makes Blue Iris drop reference frames at full resolution.
+    /// Profile for recorded playback (clips, timeline). Clip streams (`file/clips/`) honor `d2w` when the camera's
+    /// Webcast setting allows direct-to-wire for playback (BI 6.1.3: H.265 recordings arrive untouched at 1x);
+    /// timeline streams (`time/`) are composited and always re-encoded to H.264 at ~30 fps, even with `isolate`.
+    /// Whenever Blue Iris does transcode, a direct-to-wire profile keeps its size but leaves the quality to Blue Iris
+    /// instead of the Default Video Quality, which at high values makes Blue Iris drop reference frames at full
+    /// resolution.
     pub fn playback_profile(&self) -> bi_proto::profile::StreamingProfile {
         let p = self.selected_profile();
         if p.direct_to_wire == 2 { p } else { self.current_profile() }
