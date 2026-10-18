@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="app/assets/logo.png" alt="UI3 Native logo: an eye with a rust-orange gear iris inside blue and gray arcs" width="140">
+  <img src="app/assets/logo.png" alt="UI3 Native logo: an eye with a rust-orange gear iris inside blue and gray arcs" width="300">
 </p>
 
 <h1 align="center">UI3 Native</h1>
