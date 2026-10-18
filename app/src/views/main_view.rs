@@ -40,6 +40,10 @@ pub enum Content {
     Timeline { id: String },
 }
 
+const UNREACHABLE_TOAST: &str = "server-unreachable";
+/// Consecutive failed polls (camlist and status count separately) before the toast appears and polling slows.
+const UNREACHABLE_TOAST_AFTER: u32 = 3;
+
 pub struct MainView {
     pub client: BiClient,
     pub session: Session,
@@ -77,6 +81,8 @@ pub struct MainView {
     status_job: Option<Pending<Result<StatusData>>>,
     last_camlist: Instant,
     last_status: Instant,
+    /// Consecutive camlist/status polls that could not reach the server.
+    unreachable_streak: u32,
     pub logout_requested: bool,
     /// Live stream reconnect bookkeeping.
     reconnect_at: Option<Instant>,
@@ -124,6 +130,7 @@ impl MainView {
             status_job: None,
             last_camlist: Instant::now(),
             last_status: Instant::now() - Duration::from_secs(60),
+            unreachable_streak: 0,
             logout_requested: false,
             reconnect_at: None,
             last_live_open: None,
@@ -273,6 +280,25 @@ impl MainView {
         }
     }
 
+    fn poll_reached(&mut self, svc: &mut Services) {
+        self.unreachable_streak = 0;
+        if svc.toasts.clear_sticky(UNREACHABLE_TOAST) {
+            svc.toasts.success("Reconnected to Blue Iris.");
+        }
+    }
+
+    /// One failed poll is usually a dropped keep-alive connection, so the toast waits for a few in a row.
+    fn poll_unreachable(&mut self, e: &anyhow::Error, svc: &mut Services) {
+        self.unreachable_streak += 1;
+        tracing::debug!("poll could not reach server ({}): {e:#}", self.unreachable_streak);
+        if self.unreachable_streak >= UNREACHABLE_TOAST_AFTER {
+            let host = self.client.base_url().trim_start_matches("http://").trim_start_matches("https://").trim_end_matches('/');
+            let msg = format!("Can't reach Blue Iris at {host}: {}
+Retrying every 15 seconds.", e.root_cause());
+            svc.toasts.set_sticky(UNREACHABLE_TOAST, crate::toasts::Level::Error, msg);
+        }
+    }
+
     fn poll_background(&mut self, ctx: &egui::Context, svc: &mut Services) {
         if let Some(j) = &mut self.camlist_job
             && let Some(r) = j.poll()
@@ -280,10 +306,15 @@ impl MainView {
             self.camlist_job = None;
             match r {
                 Ok(c) if !c.is_empty() => {
+                    self.poll_reached(svc);
                     self.cameras = c;
                     self.on_camlist_updated(ctx, svc);
                 }
-                Ok(_) => svc.toasts.error("Camera list is empty!"),
+                Ok(_) => {
+                    self.poll_reached(svc);
+                    svc.toasts.error("Camera list is empty!");
+                }
+                Err(e) if bi_proto::client::is_unreachable(&e) => self.poll_unreachable(&e, svc),
                 Err(e) => svc.toasts.warn(format!("Camera list update failed: {e:#}")),
             }
         }
@@ -293,20 +324,24 @@ impl MainView {
             self.status_job = None;
             match r {
                 Ok(s) => {
+                    self.poll_reached(svc);
                     if let Some(old) = &self.status {
                         self.notice_status_changes(old, &s, svc);
                     }
                     self.status = Some(s);
                 }
+                Err(e) if bi_proto::client::is_unreachable(&e) => self.poll_unreachable(&e, svc),
                 Err(e) => svc.toasts.warn(format!("Status update failed: {e:#}")),
             }
         }
-        if self.camlist_job.is_none() && self.last_camlist.elapsed() > Duration::from_secs(5) {
+        // Poll less often while the server is unreachable.
+        let interval = Duration::from_secs(if self.unreachable_streak >= UNREACHABLE_TOAST_AFTER { 15 } else { 5 });
+        if self.camlist_job.is_none() && self.last_camlist.elapsed() > interval {
             self.last_camlist = Instant::now();
             let c = self.client.clone();
             self.camlist_job = Some(runtime::spawn(ctx, async move { c.camlist(false).await }));
         }
-        if self.status_job.is_none() && self.last_status.elapsed() > Duration::from_secs(5) {
+        if self.status_job.is_none() && self.last_status.elapsed() > interval {
             self.last_status = Instant::now();
             let c = self.client.clone();
             self.status_job = Some(runtime::spawn(ctx, async move { c.status(None).await }));

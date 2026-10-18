@@ -261,6 +261,11 @@ impl HttpBytes {
     }
 }
 
+/// True when `e` came from failing to reach the server (connect, reset, timeout) rather than from a reply it sent.
+pub fn is_unreachable(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_connect() || r.is_request() || r.is_timeout() || r.is_body()))
+}
+
 fn truncate(s: &str, n: usize) -> &str {
     match s.char_indices().nth(n) {
         Some((i, _)) => &s[..i],

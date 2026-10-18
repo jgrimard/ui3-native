@@ -13,12 +13,16 @@ pub enum Level {
 struct Toast {
     level: Level,
     text: String,
-    until: Instant,
+    /// `None` for a sticky toast, which stays until [`Toasts::clear_sticky`] or a click.
+    until: Option<Instant>,
+    key: Option<&'static str>,
 }
 
 #[derive(Default)]
 pub struct Toasts {
     items: Vec<Toast>,
+    /// Sticky keys the user clicked away; they stay hidden until cleared.
+    dismissed: Vec<&'static str>,
 }
 
 impl Toasts {
@@ -30,14 +34,40 @@ impl Toasts {
             _ => tracing::info!("{text}"),
         }
         // Collapse duplicates.
-        if let Some(t) = self.items.iter_mut().find(|t| t.text == text) {
-            t.until = Instant::now() + Duration::from_millis(ms);
+        if let Some(t) = self.items.iter_mut().find(|t| t.text == text && t.key.is_none()) {
+            t.until = Some(Instant::now() + Duration::from_millis(ms));
             return;
         }
-        self.items.push(Toast { level, text, until: Instant::now() + Duration::from_millis(ms) });
+        self.items.push(Toast { level, text, until: Some(Instant::now() + Duration::from_millis(ms)), key: None });
         if self.items.len() > 8 {
-            self.items.remove(0);
+            let i = self.items.iter().position(|t| t.key.is_none()).unwrap_or(0);
+            self.items.remove(i);
         }
+    }
+    /// Shows or updates the toast for `key`, which stays until [`Self::clear_sticky`]. Logs only when the text changes.
+    pub fn set_sticky(&mut self, key: &'static str, level: Level, text: impl Into<String>) {
+        let text = text.into();
+        if let Some(t) = self.items.iter_mut().find(|t| t.key == Some(key)) {
+            if t.text != text {
+                tracing::warn!("{text}");
+                t.text = text;
+                t.level = level;
+            }
+            return;
+        }
+        if self.dismissed.contains(&key) {
+            return;
+        }
+        tracing::warn!("{text}");
+        self.items.push(Toast { level, text, until: None, key: Some(key) });
+    }
+    /// Removes the sticky toast for `key`; returns whether one was showing (or had been dismissed).
+    pub fn clear_sticky(&mut self, key: &'static str) -> bool {
+        let n = self.items.len();
+        self.items.retain(|t| t.key != Some(key));
+        let was_dismissed = self.dismissed.contains(&key);
+        self.dismissed.retain(|k| *k != key);
+        self.items.len() != n || was_dismissed
     }
     pub fn info(&mut self, t: impl Into<String>) {
         self.add(Level::Info, t, 4000);
@@ -54,7 +84,7 @@ impl Toasts {
 
     pub fn show(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
-        self.items.retain(|t| t.until > now);
+        self.items.retain(|t| t.until.is_none_or(|u| u > now));
         if self.items.is_empty() {
             return;
         }
@@ -89,8 +119,10 @@ impl Toasts {
                     }
                 }
             });
-        if let Some(i) = close {
-            self.items.remove(i);
+        if let Some(i) = close
+            && let Some(key) = self.items.remove(i).key
+        {
+            self.dismissed.push(key);
         }
         ctx.request_repaint_after(Duration::from_millis(500));
     }
