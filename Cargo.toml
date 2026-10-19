@@ -4,7 +4,7 @@ members = ["crates/bi-proto", "crates/bi-media", "crates/bi-render", "app", "too
 
 [workspace.package]
 edition = "2024"
-version = "0.1.1"
+version = "0.1.2"
 license = "LGPL-3.0-only"
 
 [workspace.dependencies]
