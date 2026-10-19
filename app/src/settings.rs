@@ -103,11 +103,13 @@ pub struct NativeOptions {
     pub show_stats_overlay: bool,
     /// Render hardware-decoded frames straight from the decoder's GPU textures (no copy through system memory).
     pub zero_copy: bool,
+    /// A fast drag on the timeline keeps coasting after release and slows to a stop.
+    pub timeline_inertia: bool,
 }
 
 impl Default for NativeOptions {
     fn default() -> Self {
-        NativeOptions { hw_decode: "Auto".into(), client_side_grid: false, grid_use_substream: true, scrub_cache_frames: 400, show_stats_overlay: false, zero_copy: true }
+        NativeOptions { hw_decode: "Auto".into(), client_side_grid: false, grid_use_substream: true, scrub_cache_frames: 400, show_stats_overlay: false, zero_copy: true, timeline_inertia: true }
     }
 }
 

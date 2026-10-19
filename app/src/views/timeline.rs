@@ -22,6 +22,14 @@ const KEEP_OUT_MS: i64 = 15_000;
 const MAX_ZOOM: f64 = 30.0;
 const MIN_SAVED_ZOOM: f64 = 6.0;
 const MAX_SAVED_ZOOM: f64 = 19.0;
+// Drag inertia, in screen pixels so it feels the same at every zoom level.
+/// Release velocity is measured over this trailing window, so pausing before release means no fling.
+const FLING_WINDOW_S: f64 = 0.08;
+const FLING_MIN_PX_S: f32 = 300.0;
+const FLING_MAX_PX_S: f32 = 3000.0;
+/// Exponential decay rate: velocity halves about every 140 ms.
+const COAST_FRICTION: f32 = 5.0;
+const COAST_STOP_PX_S: f32 = 20.0;
 
 #[derive(Clone)]
 struct TlAlert {
@@ -72,7 +80,14 @@ pub struct TimelinePanel {
     last_failure: Option<Instant>,
     pub error: Option<String>,
     drag_start_x: Option<f32>,
+    /// Also true while coasting or caught, so playback-follow and live tracking stay out of the way.
     dragging: bool,
+    /// Recent (input time, pointer x) while dragging, for the release velocity.
+    drag_samples: Vec<(f64, f32)>,
+    /// Coasting after a fling, in px/s (positive = pointer moving right).
+    coast_vel: Option<f32>,
+    /// A press stopped the coast; finishes on release unless it turns into a new drag.
+    coast_caught: bool,
     wheel_pan_until: Option<Instant>,
     zoom_accum: f64,
     pub paused: bool,
@@ -102,6 +117,9 @@ impl TimelinePanel {
             error: None,
             drag_start_x: None,
             dragging: false,
+            drag_samples: Vec::new(),
+            coast_vel: None,
+            coast_caught: false,
             wheel_pan_until: None,
             zoom_accum: 0.0,
             paused: false,
@@ -278,8 +296,53 @@ impl TimelinePanel {
         self.user_did_set_time(ctx, client, player, svc);
     }
 
+    /// Abandons an inertial coast (or a caught one) when something else sets the time.
+    fn stop_coast(&mut self) {
+        if self.coast_vel.is_some() || self.coast_caught {
+            self.coast_vel = None;
+            self.coast_caught = false;
+            self.dragging = false;
+            self.seek.cancel_queued();
+        }
+    }
+
+    /// Release velocity in px/s from the trailing sample window, if fast enough to fling.
+    fn fling_velocity(&self) -> Option<f32> {
+        let &(t1, x1) = self.drag_samples.last()?;
+        let &(t0, x0) = self.drag_samples.iter().find(|s| s.0 >= t1 - FLING_WINDOW_S)?;
+        if t1 - t0 < 0.015 {
+            return None;
+        }
+        let v = (x1 - x0) / (t1 - t0) as f32;
+        (v.abs() >= FLING_MIN_PX_S).then(|| v.clamp(-FLING_MAX_PX_S, FLING_MAX_PX_S))
+    }
+
+    /// Seek preview while panning (single in-flight request, newest wins).
+    fn scrub_preview(&mut self, ctx: &egui::Context, client: &BiClient, player: &mut Player, settings: &Settings) {
+        let t = self.current_time();
+        if t >= self.server_now() - KEEP_OUT_MS {
+            return;
+        }
+        let zf = self.zoom_factor();
+        let prof = settings.current_profile();
+        let mut q = profile::seek_preview_quality_args(&prof, self.native_size(), 0.0, true);
+        if settings.bool("ui3_seek_with_substream") {
+            q.push_str("&decode=-1");
+        }
+        let group = crate::views::video::group_args(settings, &self.target).args();
+        let overlay = crate::views::dialogs::overlay_args(settings, "*ui3_timeline_pseudocam").args();
+        // Quantize to the pixel so we do not request the same frame repeatedly.
+        // In f64 throughout: truncating zf before multiplying by ~1e8 pixels lands hours/days away.
+        let tq = ((t as f64 / zf).round() * zf).round() as i64;
+        let path = urls::timeline_frame_jpeg(&self.target, client.preview_opaque(), tq, 0, &q, &group, &overlay);
+        if let Some(f) = self.seek.request(ctx, client, ScrubRequest { path, tag: tq }) {
+            player.set_still(f.image);
+        }
+    }
+
     /// Opens timeline video at the current time (or live / a still frame).
     pub fn user_did_set_time(&mut self, ctx: &egui::Context, client: &BiClient, player: &mut Player, svc: &mut Services) {
+        self.stop_coast();
         self.assign_last_set_time(self.last_set_time);
         let now = self.server_now();
         if self.current_time() >= now - KEEP_OUT_MS {
@@ -351,6 +414,7 @@ impl TimelinePanel {
     }
 
     pub fn toggle_pause(&mut self, ctx: &egui::Context, client: &BiClient, player: &mut Player, svc: &mut Services) {
+        self.stop_coast();
         if self.paused {
             self.paused = false;
             if self.is_live {
@@ -367,6 +431,7 @@ impl TimelinePanel {
 
     /// Previous/next alert (`TimelineJump`, `&jump=±1`).
     pub fn jump(&mut self, ctx: &egui::Context, client: &BiClient, player: &mut Player, svc: &mut Services, dir: i32) {
+        self.stop_coast();
         let t = self.current_time();
         let play = !self.paused;
         self.is_live = false;
@@ -555,6 +620,9 @@ fn draw(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
             tl.last_set_time += (scroll_x as f64 * zf) as i64;
             tl.wheel_pan_until = Some(Instant::now() + Duration::from_millis(200));
             tl.is_live = false;
+            // Wheel panning takes over from a coast; the wheel-pan timeout finishes it.
+            tl.coast_vel = None;
+            tl.coast_caught = false;
         }
         let zoom_delta = ui.input(|i| i.zoom_delta());
         if (zoom_delta - 1.0).abs() > 0.001 {
@@ -564,9 +632,17 @@ fn draw(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
     } else {
         tl.hover_x = None;
     }
+    let input_time = ui.input(|i| i.time);
+    // A press during a coast catches it where it is (still `dragging`, so a new drag continues from here).
+    if tl.coast_vel.is_some() && resp.is_pointer_button_down_on() {
+        tl.coast_vel = None;
+        tl.coast_caught = true;
+    }
     if resp.drag_started() {
         tl.drag_start_x = resp.interact_pointer_pos().map(|p| p.x);
         tl.did_pause = !tl.paused;
+        tl.drag_samples.clear();
+        tl.coast_caught = false;
     }
     if resp.dragged()
         && let (Some(sx), Some(p)) = (tl.drag_start_x, resp.interact_pointer_pos())
@@ -581,29 +657,61 @@ fn draw(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
             }
             tl.drag_start_x = Some(p.x);
             tl.last_set_time += (-(d as f64) * zf) as i64;
-            // Seek preview while panning (single in-flight request, newest wins).
-            let t = tl.current_time();
-            if t < now - KEEP_OUT_MS {
-                let prof = svc.settings.current_profile();
-                let mut q = profile::seek_preview_quality_args(&prof, tl.native_size(), 0.0, true);
-                if svc.settings.bool("ui3_seek_with_substream") {
-                    q.push_str("&decode=-1");
-                }
-                let group = crate::views::video::group_args(svc.settings, &tl.target).args();
-                let overlay = crate::views::dialogs::overlay_args(svc.settings, "*ui3_timeline_pseudocam").args();
-                // Quantize to the pixel so we do not request the same frame repeatedly.
-                // In f64 throughout: truncating zf before multiplying by ~1e8 pixels lands hours/days away.
-                let tq = ((t as f64 / zf).round() * zf).round() as i64;
-                let path = urls::timeline_frame_jpeg(&tl.target, view.client.preview_opaque(), tq, 0, &q, &group, &overlay);
-                if let Some(f) = tl.seek.request(&ctx, &view.client, ScrubRequest { path, tag: tq }) {
-                    view.player.set_still(f.image);
-                }
-            }
+            tl.drag_samples.retain(|s| s.0 >= input_time - 2.0 * FLING_WINDOW_S);
+            tl.drag_samples.push((input_time, p.x));
+            tl.scrub_preview(&ctx, &view.client, &mut view.player, svc.settings);
+        }
+    }
+    // Inertial coast: exponential decay, stopping at the live edge or the start of time.
+    let mut coast_done = false;
+    if let Some(v) = tl.coast_vel {
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        tl.last_set_time += (-(v * dt) as f64 * zf) as i64;
+        let v = v * (-COAST_FRICTION * dt).exp();
+        if tl.last_set_time >= tl.server_now() - KEEP_OUT_MS {
+            tl.last_set_time = tl.server_now();
+            coast_done = true;
+        } else if tl.last_set_time <= 1 {
+            tl.last_set_time = 1;
+            coast_done = true;
+        } else if v.abs() < COAST_STOP_PX_S {
+            coast_done = true;
+        }
+        if coast_done {
+            tl.coast_vel = None;
+        } else {
+            tl.coast_vel = Some(v);
+            tl.scrub_preview(&ctx, &view.client, &mut view.player, svc.settings);
+            ctx.request_repaint();
         }
     }
     let wheel_pan_done = tl.wheel_pan_until.is_some_and(|t| Instant::now() >= t);
-    if resp.drag_stopped() || wheel_pan_done {
+    let catch_released = tl.coast_caught && !ui.input(|i| i.pointer.any_down());
+    let mut finish = wheel_pan_done || coast_done || catch_released;
+    if resp.drag_stopped() {
+        let mut fling = None;
+        if tl.dragging
+            && svc.settings.native.timeline_inertia
+            && let Some(&(_, x)) = tl.drag_samples.last()
+        {
+            // Release sample at the last position, so holding still before letting go reads as zero velocity.
+            tl.drag_samples.push((input_time, x));
+            fling = tl.fling_velocity();
+        }
+        if let Some(v) = fling {
+            tl.coast_vel = Some(v);
+            tl.last_set_time = tl.last_set_time.clamp(1, tl.server_now());
+            tl.drag_start_x = None;
+            ctx.request_repaint();
+        } else {
+            finish = true;
+        }
+    }
+    if finish {
         tl.wheel_pan_until = None;
+        tl.coast_vel = None;
+        tl.coast_caught = false;
+        tl.drag_samples.clear();
         let was_drag = tl.dragging;
         tl.dragging = false;
         tl.drag_start_x = None;

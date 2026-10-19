@@ -630,6 +630,9 @@ fn native_settings(ui: &mut egui::Ui, svc: &mut Services) {
         ui.label("Scrub frame cache (frames)");
         changed |= ui.add(egui::DragValue::new(&mut n.scrub_cache_frames).range(16..=4000)).changed();
         ui.end_row();
+        ui.label("Timeline drag inertia").on_hover_text("Fling the timeline and it keeps coasting, slowing to a stop. Slow drags stop where you release. Click the timeline to catch it.");
+        changed |= ui.checkbox(&mut n.timeline_inertia, "").changed();
+        ui.end_row();
         ui.label("Stats overlay");
         changed |= ui.checkbox(&mut n.show_stats_overlay, "").changed();
         ui.end_row();
