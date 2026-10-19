@@ -287,7 +287,7 @@ impl Hotkey {
         Some(Hotkey { ctrl: p[0] == "1", alt: p[1] == "1", shift: p[2] == "1", key: keycode_to_key(code)? })
     }
 
-    pub fn to_ui3_string(&self) -> String {
+    pub fn to_ui3_string(self) -> String {
         format!("{}|{}|{}|{}", self.ctrl as u8, self.alt as u8, self.shift as u8, key_to_keycode(self.key).unwrap_or(0))
     }
 

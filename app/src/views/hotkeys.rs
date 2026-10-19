@@ -64,11 +64,11 @@ pub fn handle(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
             continue;
         }
         for n in 1..=40 {
-            if hk(&format!("ui3_hotkey_ptzPreset{n}")) {
-                if let Some(cam) = view.current_single_camera().filter(|c| c.ptz).map(|c| c.id.clone()) {
-                    view.ptz.camera_changed(&cam);
-                    view.ptz.enqueue(&cam, crate::views::ptz::PtzAction::Button(ptz::PRESET_BASE + n));
-                }
+            if hk(&format!("ui3_hotkey_ptzPreset{n}"))
+                && let Some(cam) = view.current_single_camera().filter(|c| c.ptz).map(|c| c.id.clone())
+            {
+                view.ptz.camera_changed(&cam);
+                view.ptz.enqueue(&cam, crate::views::ptz::PtzAction::Button(ptz::PRESET_BASE + n));
             }
         }
         let client = view.client.clone();
@@ -196,10 +196,9 @@ pub fn handle(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
         .iter()
         .find(|(n, _)| hk(n))
         .map(|(_, d)| *d)
+            && let (Some(area), Some(size)) = (view.video.last_area, view.video.picture_size())
         {
-            if let (Some(area), Some(size)) = (view.video.last_area, view.video.picture_size()) {
-                view.video.pan_by(area, size, d);
-            }
+            view.video.pan_by(area, size, d);
         }
     }
     // Escape always restores from maximized video area / mini mode (UI3 behaviour).

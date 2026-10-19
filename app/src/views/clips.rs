@@ -41,6 +41,8 @@ struct Preview {
     next_at: Instant,
 }
 
+type LoadKey = (String, String, String, Option<(NaiveDate, NaiveDate)>);
+
 pub struct ClipsPanel {
     pub db_view: String,
     pub camera_filter: String,
@@ -55,7 +57,7 @@ pub struct ClipsPanel {
     pub clips: Vec<ClipItem>,
     rows: Vec<Row>,
     job: Option<Pending<Result<Vec<ClipItem>>>>,
-    loaded_for: Option<(String, String, String, Option<(NaiveDate, NaiveDate)>)>,
+    loaded_for: Option<LoadKey>,
     pub error: Option<String>,
     thumbs: HashMap<String, Thumb>,
     thumb_queue: VecDeque<String>,

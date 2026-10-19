@@ -576,9 +576,7 @@ fn settings_panel(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services, ar
     view.controls.poke();
     if let Some(p) = next_panel {
         view.controls.panel = Some(p);
-    } else if close {
-        view.controls.panel = None;
-    } else if !view.controls.panel_opened && (resp.response.clicked_elsewhere() || ui.input(|i| i.key_pressed(egui::Key::Escape))) {
+    } else if close || (!view.controls.panel_opened && (resp.response.clicked_elsewhere() || ui.input(|i| i.key_pressed(egui::Key::Escape)))) {
         view.controls.panel = None;
     }
     view.controls.panel_opened = false;

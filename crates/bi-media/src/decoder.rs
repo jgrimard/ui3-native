@@ -179,7 +179,7 @@ impl VideoDecoder {
                 last_zero_copy: false,
             };
             (*ctx).flags |= ff::AV_CODEC_FLAG_LOW_DELAY as i32;
-            (*ctx).flags2 |= ff::AV_CODEC_FLAG2_FAST as i32;
+            (*ctx).flags2 |= ff::AV_CODEC_FLAG2_FAST;
             (*ctx).pkt_timebase = ff::AVRational { num: 1, den: 1000 };
             if let Some(sh) = shared.filter(|_| accel != HwAccel::Software && codec != VideoCodec::Jpeg) {
                 (*ctx).hw_device_ctx = sh.hw_device_ref();

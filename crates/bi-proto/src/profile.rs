@@ -277,6 +277,7 @@ impl StreamingProfile {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mk(name: &str, abbr: &str, clr: &str, vcodec: VCodec, w: i32, h: i32, q5: i32, kbps: i32) -> StreamingProfile {
     let mut p = StreamingProfile { name: name.into(), abbr: abbr.into(), abbr_color: clr.into(), vcodec, w, h, kbps, ..Default::default() };
     p.set_quality_bi5(q5);

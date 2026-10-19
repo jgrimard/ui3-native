@@ -18,5 +18,5 @@ pub fn ffmpeg_version() -> String {
 
 /// Silences FFmpeg's stderr logging except errors.
 pub fn quiet_ffmpeg_logs() {
-    unsafe { ffmpeg_sys_next::av_log_set_level(ffmpeg_sys_next::AV_LOG_ERROR as i32) }
+    unsafe { ffmpeg_sys_next::av_log_set_level(ffmpeg_sys_next::AV_LOG_ERROR) }
 }

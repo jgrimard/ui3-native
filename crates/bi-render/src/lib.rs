@@ -295,9 +295,8 @@ impl VideoTexture {
             let mut cache = self.pipe.shared.lock();
             // Forget textures whose ring slot is gone (decoder closed or resized).
             cache.retain(|_, t| t.slot.strong_count() > 0);
-            if !cache.contains_key(&g.slot.id) {
-                let t = open_shared(device, g)?;
-                cache.insert(g.slot.id, t);
+            if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(g.slot.id) {
+                e.insert(open_shared(device, g)?);
             }
             let t = &cache[&g.slot.id];
             (t.y.clone(), t.uv.clone())

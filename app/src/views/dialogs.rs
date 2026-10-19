@@ -413,7 +413,7 @@ pub fn show(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
             Dialog::UpdateCheck => json_window(view, ctx, "Blue Iris Updates", "updatecheck", &mut open),
             Dialog::About => about_window(view, ctx, svc, &mut open),
             Dialog::ClipProperties(c) => clip_properties_window(view, ctx, svc, c, &mut open),
-            Dialog::Export(c) => export_window(view, ctx, svc, ExportTarget::Clip((**c).clone()), &mut open),
+            Dialog::Export(c) => export_window(view, ctx, svc, ExportTarget::Clip(c.clone()), &mut open),
             Dialog::TimelineExport { camera, start, end } => export_window(view, ctx, svc, ExportTarget::Range { camera: camera.clone(), start: *start, end: *end }, &mut open),
         }
         if open {
@@ -877,7 +877,7 @@ fn camera_properties_window(view: &mut MainView, ctx: &egui::Context, svc: &mut 
         };
         let b = |k: &str| bi_proto::lenient::value_to_bool(&cfg[k]);
         egui::Grid::new("camprops").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-            let toggles: [(&str, &str, fn(bool) -> CamConfig); 7] = [
+            let toggles: [CamToggle; 7] = [
                 ("Motion detector", "motion", CamConfig::Motion),
                 ("Override global schedule", "schedule", CamConfig::Schedule),
                 ("PTZ preset cycle", "ptzcycle", CamConfig::PtzCycle),
@@ -1281,8 +1281,10 @@ fn clip_properties_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Se
 // ---------------------------------------------------------------------------------------------------------------
 // Export (`ClipExportPanel`, ui3.js:30042) + native client-side MP4 export (supports H.265, unlike UI3's AVI exporter)
 
+type CamToggle = (&'static str, &'static str, fn(bool) -> CamConfig);
+
 enum ExportTarget {
-    Clip(ClipItem),
+    Clip(Box<ClipItem>),
     Range { camera: String, start: i64, end: i64 },
 }
 

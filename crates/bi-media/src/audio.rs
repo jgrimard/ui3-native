@@ -354,8 +354,8 @@ pub fn decode_sound_file(path: &std::path::Path, rate: u32, channels: u16) -> Re
         let drain = |frame: *mut ff::AVFrame, out: &mut Vec<f32>| {
             let max = ff::swr_get_out_samples(swr, (*frame).nb_samples).max(0) as usize;
             let mut buf = vec![0f32; max * channels as usize];
-            let mut dst = buf.as_mut_ptr() as *mut u8;
-            let n = ff::swr_convert(swr, &mut dst, max as i32, (*frame).extended_data as *const *const u8, (*frame).nb_samples);
+            let dst = buf.as_mut_ptr() as *mut u8;
+            let n = ff::swr_convert(swr, &dst, max as i32, (*frame).extended_data as *const *const u8, (*frame).nb_samples);
             if n > 0 {
                 out.extend_from_slice(&buf[..n as usize * channels as usize]);
             }

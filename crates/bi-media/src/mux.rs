@@ -84,7 +84,7 @@ impl Mp4Muxer {
                 (*par).codec_tag = u32::from_le_bytes(*b"hvc1");
             }
             (*st).time_base = ff::AVRational { num: 1, den: 1000 };
-            let r = ff::avio_open(&mut (*fmt).pb, cpath.as_ptr(), ff::AVIO_FLAG_WRITE as i32);
+            let r = ff::avio_open(&mut (*fmt).pb, cpath.as_ptr(), ff::AVIO_FLAG_WRITE);
             if r < 0 {
                 ff::avformat_free_context(fmt);
                 bail!("avio_open({}): {}", path.display(), crate::decoder::av_err(r));
@@ -132,7 +132,7 @@ impl Mp4Muxer {
             (*self.pkt).dts = ts;
             (*self.pkt).stream_index = 0;
             if keyframe {
-                (*self.pkt).flags |= ff::AV_PKT_FLAG_KEY as i32;
+                (*self.pkt).flags |= ff::AV_PKT_FLAG_KEY;
             }
             let tb = (*self.stream).time_base;
             ff::av_packet_rescale_ts(self.pkt, ff::AVRational { num: 1, den: 1000 }, tb);

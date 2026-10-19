@@ -117,7 +117,7 @@ fn load_media(root: &std::path::Path, src: &std::path::Path) -> Result<Media> {
         let ff = root.join("third_party/ffmpeg/bin/ffmpeg.exe");
         let st = std::process::Command::new(ff)
             .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-            .arg(&src)
+            .arg(src)
             .args(["-vf", "scale=1280:-2", "-q:v", "5"])
             .arg(dir.join("f_%04d.jpg"))
             .status()?;
@@ -165,8 +165,10 @@ fn encode_still(root: &std::path::Path, img: &std::path::Path, out: &std::path::
     Ok(())
 }
 
+type Showcase = (Vec<CamDef>, HashMap<String, Arc<Media>>);
+
 /// One camera per `NN-name.png|jpg` in `dir`; `NNb-*.png` is camera `NN`'s alert footage.
-fn load_showcase(root: &std::path::Path, dir: &std::path::Path) -> Result<(Vec<CamDef>, HashMap<String, Arc<Media>>)> {
+fn load_showcase(root: &std::path::Path, dir: &std::path::Path) -> Result<Showcase> {
     const PALETTE: [i64; 9] = [0x2E86DE, 0xE67E22, 0x27AE60, 0x8E44AD, 0xC0392B, 0x16A085, 0xF1C40F, 0xD35400, 0x95A5A6];
     let mut images: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -260,7 +262,7 @@ async fn main() -> Result<()> {
             let date = (start - k as i64 * 600_000) / 1000;
             let m = &cams[&cam.id];
             let cpath = format!("@{id}.bvr");
-            let flags = if k % 7 == 0 { 2 } else { 0 } | (1 << 8) * (k == 0) as i64;
+            let flags = if k % 7 == 0 { 2 } else { 0 } | ((1 << 8) * (k == 0) as i64);
             clips.push(Clip { path: cpath.clone(), camera: cam.id.clone(), media: cam.id.clone(), date, msec: m.duration_ms, flags, is_alert: false, clip_path: cpath.clone(), offset: 0, memo: String::new() });
             // Showcase: staggered across cameras, mostly on the cameras that have alert footage.
             let alert = match showcase {
@@ -539,7 +541,7 @@ fn live_stream(m: Arc<Media>, ulaw: Bytes, audio: bool, motion: Option<bool>) ->
                 }
                 w.audio(&chunk);
             }
-            if n % 15 == 0 {
+            if n.is_multiple_of(15) {
                 w.status(&StatusBlock { rec: true, motion: motion.unwrap_or((n / 150) % 2 == 1), fps_x100: (m.el.fps * 100.0) as i32, apeak: 9000, ..Default::default() });
             }
             if tx.send(Bytes::from(w.out)).await.is_err() {
@@ -598,7 +600,6 @@ fn clip_stream(m: Arc<Media>, start_ms: i64, speed: i32, ulaw: Bytes, audio: boo
                 if tx.send(Bytes::from(w.out)).await.is_err() {
                     return;
                 }
-                sent += 1;
                 tokio::time::sleep(Duration::from_millis((frame_ms * 30.0 / rate) as u64)).await;
             }
         }

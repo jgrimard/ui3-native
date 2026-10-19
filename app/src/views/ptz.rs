@@ -105,6 +105,8 @@ impl PtzState {
 /// UI3 retries a failed hold start/stop every 100 ms until it succeeds (`PTZ_unsafe_async_guarantee`).
 const RETRY_DELAY: Duration = Duration::from_millis(100);
 
+type PresetKey = (String, i32);
+
 #[derive(Default)]
 pub struct PtzPanel {
     camera: String,
@@ -122,8 +124,8 @@ pub struct PtzPanel {
     retry: Option<(Instant, String, i32, bool)>,
     /// The current video is live from a PTZ camera the user may control.
     available: bool,
-    preset_thumbs: HashMap<(String, i32), Option<egui::TextureHandle>>,
-    thumb_jobs: Vec<((String, i32), Pending<Result<egui::ColorImage>>)>,
+    preset_thumbs: HashMap<PresetKey, Option<egui::TextureHandle>>,
+    thumb_jobs: Vec<(PresetKey, Pending<Result<egui::ColorImage>>)>,
     preset_edit: Option<(i32, String)>,
     gamepad: Option<gilrs::Gilrs>,
     gamepad_init: bool,
