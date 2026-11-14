@@ -27,11 +27,13 @@ pub struct Controls {
     /// The panel was opened this frame (its opening click must not close it).
     panel_opened: bool,
     volume_drag: bool,
+    /// Window size before entering mini mode, restored when leaving it.
+    pre_mini_size: Option<egui::Vec2>,
 }
 
 impl Default for Controls {
     fn default() -> Self {
-        Controls { visible_until: Instant::now() + Duration::from_secs(3), panel: None, panel_opened: false, volume_drag: false }
+        Controls { visible_until: Instant::now() + Duration::from_secs(3), panel: None, panel_opened: false, volume_drag: false, pre_mini_size: None }
     }
 }
 
@@ -58,6 +60,7 @@ pub fn set_maximized(view: &mut MainView, svc: &mut Services, on: bool) {
 pub fn enter_mini_mode(view: &mut MainView, ctx: &egui::Context) {
     view.mini_mode = true;
     view.maximized = true;
+    view.controls.pre_mini_size = ctx.input(|i| i.viewport().inner_rect).map(|r| r.size());
     ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(480.0, 270.0)));
 }
@@ -66,7 +69,8 @@ pub fn exit_mini_mode(view: &mut MainView, ctx: &egui::Context) {
     view.mini_mode = false;
     view.maximized = false;
     ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
-    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1400.0, 860.0)));
+    let size = view.controls.pre_mini_size.take().unwrap_or(egui::vec2(1400.0, 860.0));
+    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
 }
 
 /// Vertical gradient fill (CSS `linear-gradient(to bottom, top, bottom)`).
@@ -192,7 +196,6 @@ pub fn show(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services, area: Re
     if is_timeline {
         let client = view.client.clone();
         let tl = &mut view.timeline;
-        let playing = !tl.paused && !tl.is_live;
         if w::pc_button(&mut left, if tl.paused { icons::PLAY } else { icons::PAUSE }, if tl.paused { "Play" } else { "Pause" }).clicked() {
             tl.toggle_pause(&ctx, &client, &mut view.player, svc);
         }
@@ -202,7 +205,6 @@ pub fn show(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services, area: Re
         if w::pc_button(&mut left, icons::SKIP_FORWARD, "Next Alert").clicked() {
             tl.jump(&ctx, &client, &mut view.player, svc, 1);
         }
-        let _ = playing;
     }
     if svc.settings.bool("ui3_feature_enabled_volumeBar") && view.session.login.permissions().audio {
         volume_bar(view, &mut left, svc);
@@ -239,7 +241,7 @@ pub fn show(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services, area: Re
             view.dialogs.open(crate::views::dialogs::Dialog::Export(Box::new(clip.clone())));
         }
         if w::pc_button(&mut right, icons::DOWNLOAD, "Download Clip").clicked() {
-            crate::views::dialogs::download_clips(view, svc, vec![clip.clone()]);
+            crate::views::dialogs::download_clips(view, &ctx, svc, vec![clip.clone()]);
         }
         let flagged = clip.has_flag(flags::FLAGGED);
         let fr = pc_button_colored(&mut right, icons::FLAG, if flagged { "Unflag" } else { "Flag" }, if flagged { Some(t().dd_blue) } else { None });
@@ -254,10 +256,7 @@ pub fn show(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services, area: Re
                 view.clips.delete_confirm = Some(vec![clip.clone()]);
                 return;
             }
-            view.clips.delete(&ctx, &view.client, vec![clip.clone()]);
-            view.playback.close();
-            let home = view.home_group.clone();
-            view.load_live(&ctx, svc.settings, Some(svc.audio), &home);
+            crate::views::clips::delete_items(view, &ctx, svc, vec![clip.clone()]);
             return;
         }
     }
@@ -336,7 +335,6 @@ fn pc_button_colored(ui: &mut egui::Ui, icon: crate::icons::Icon, tip: &str, col
     r.on_hover_text(tip)
 }
 
-/// UI3 draws "skip ahead" as the replay icon mirrored horizontally (`invertv`).
 /// Audio is requested per stream, so the stream is only reopened when the audio state it was opened with no longer
 /// matches what is wanted (`AudioToggleNotify`, ui3.js:21057). Muting an already audio-less stream changes nothing.
 fn reopen_if_audio_changed(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
@@ -346,6 +344,7 @@ fn reopen_if_audio_changed(view: &mut MainView, ctx: &egui::Context, svc: &mut S
     }
 }
 
+/// UI3 draws "skip ahead" as the replay icon mirrored horizontally (`invertv`).
 fn pc_button_mirrored(ui: &mut egui::Ui, icon: crate::icons::Icon, caption: &str, tip: &str) -> egui::Response {
     let (rect, r) = ui.allocate_exact_size(vec2(42.0, 42.0), Sense::click());
     let c = if r.hovered() { t().pctext_hover } else { t().pctext };

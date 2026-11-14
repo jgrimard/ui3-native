@@ -333,21 +333,11 @@ impl BiClient {
     pub async fn devices(&self) -> Result<Value> {
         self.json_ok(json!({"cmd": "devices"})).await
     }
-    pub async fn update_check(&self) -> Result<Value> {
-        self.json_ok(json!({"cmd": "updatecheck"})).await
-    }
 
     /// Admin GET call: `admin?camera=<id>&<args>` (`ExecAdminCall`, ui3.js:35536).
     pub async fn admin_call(&self, camera: &str, args: &str) -> Result<String> {
         let r = self.get_bytes(&format!("admin?camera={}&{}", crate::urls::encode(camera), args.trim_start_matches('&'))).await?;
         Ok(String::from_utf8_lossy(&r.body).into_owned())
-    }
-
-    /// Controls a running `/time/` stream (`/time/set`).
-    pub async fn timeline_set(&self, speed: Option<i32>, pos: Option<i64>, jump: Option<i32>) -> Result<()> {
-        let r = self.get_bytes(&crate::urls::timeline_set(self.opaque(), speed, pos, jump)).await?;
-        anyhow::ensure!(r.status < 400, "time/set failed: HTTP {}", r.status);
-        Ok(())
     }
 }
 

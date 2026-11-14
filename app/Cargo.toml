@@ -35,6 +35,8 @@ lru.workspace = true
 rfd.workspace = true
 gilrs.workspace = true
 rumqttc.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
 windows = { workspace = true, features = ["Win32_Security_Credentials", "Win32_Media_Speech", "Win32_System_Com", "Win32_Foundation", "Win32_Media_Audio", "Win32_UI_WindowsAndMessaging", "Win32_System_Power"] }
 
 [build-dependencies]

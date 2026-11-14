@@ -21,13 +21,20 @@ pub struct Tile {
     tex: Option<VideoTexture>,
     /// Normalized (0..1) rect within the group layout.
     norm: Rect,
+    /// When to reopen this tile's stream after it ended.
+    retry_at: Option<std::time::Instant>,
 }
+
+/// A tile whose stream ended is reopened after this long (same delay as the single live stream).
+const TILE_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Default)]
 pub struct Grid {
     pub group: Option<String>,
     pub tiles: Vec<Tile>,
     aspect: f32,
+    /// What the open tiles were built from (see [`Grid::config_key`]).
+    config: String,
 }
 
 impl Grid {
@@ -35,8 +42,20 @@ impl Grid {
         self.group.is_some()
     }
 
+    /// Everything the tiles depend on: the group's members and the stream options. When it changes the grid is
+    /// rebuilt.
+    fn config_key(group: &CameraInfo, settings: &crate::settings::Settings) -> String {
+        format!("{:?}|{}|{}", group.group, settings.native.grid_use_substream, settings.native.hw_decode)
+    }
+
+    /// Whether the open grid still matches `group` and the current settings.
+    pub fn is_current(&self, group: &CameraInfo, settings: &crate::settings::Settings) -> bool {
+        self.config == Self::config_key(group, settings)
+    }
+
     pub fn open(&mut self, ctx: &egui::Context, client: &BiClient, group: &CameraInfo, cams: &[CameraInfo], svc: &mut Services) {
         self.close(svc.gpu);
+        self.config = Self::config_key(group, svc.settings);
         let members = group.group.clone().unwrap_or_default();
         let rects = group.rects.clone().unwrap_or_default();
         // Normalize by the bounding box of the member rectangles (robust to group size mismatches).
@@ -69,7 +88,7 @@ impl Grid {
             let path = urls::live_video(id, AudioRequest::None, &args, "");
             let mut player = Player::new();
             player.open(client, OpenParams { path, hold_placeholder: false, mode: PlayMode::Live, timestamp_scale: 1.0, audio: false, accel: MainView::hw_accel(svc.settings) }, None, ctx);
-            self.tiles.push(Tile { id: id.clone(), player, tex: None, norm });
+            self.tiles.push(Tile { id: id.clone(), player, tex: None, norm, retry_at: None });
         }
         self.group = Some(group.id.clone());
     }
@@ -85,12 +104,28 @@ impl Grid {
         self.group = None;
     }
 
-    /// Uploads new frames and reconnects ended tiles.
-    pub fn update(&mut self, gpu: &Gpu) {
+    /// Uploads new frames and reconnects tiles whose stream ended (network drop, camera restart, session expiry:
+    /// the camera-list poll logs in again, and the next retry then succeeds).
+    pub fn update(&mut self, gpu: &Gpu, ctx: &egui::Context, client: &BiClient) {
+        let now = std::time::Instant::now();
         for t in &mut self.tiles {
             if let Some(f) = t.player.take_new_frame() {
                 let tex = t.tex.get_or_insert_with(|| gpu.new_texture());
                 gpu.upload(tex, &f);
+            }
+            if t.player.ended().is_none() {
+                t.retry_at = None;
+                continue;
+            }
+            match t.retry_at {
+                None => t.retry_at = Some(now + TILE_RETRY),
+                Some(at) if now >= at => {
+                    t.retry_at = None;
+                    if let Some(p) = t.player.params.clone() {
+                        t.player.open(client, p, None, ctx);
+                    }
+                }
+                Some(_) => {}
             }
         }
     }

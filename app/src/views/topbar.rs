@@ -19,9 +19,9 @@ const SIDEBAR_SHOWN: icons::Icon = icons::Icon { name: "sidebar_shown", svg: inc
 /// UI3 main menu items (`mainMenuItems`, ui3.js:6200): command, label, icon, style, admin only.
 pub const MAIN_MENU: &[(&str, &str, Icon, ItemKind, bool)] = &[
     ("ui_settings", "UI Settings", icons::SETTINGS, ItemKind::Golden, false),
-    ("about_this_ui", "About This UI", icons::ABOUT, ItemKind::Golden, false),
+    ("about_this_ui", "About UI3 Native", icons::ABOUT, ItemKind::Golden, false),
     ("streaming_profiles", "Streaming Profiles", icons::VIDEO_FILTER, ItemKind::Golden, false),
-    ("copy_current_url", "Copy Current URL", icons::COPY, ItemKind::Golden, false),
+    ("copy_current_url", "Copy UI3 Web Link", icons::COPY, ItemKind::Golden, false),
     ("system_log", "System Log", icons::SYSTEM_LOG, ItemKind::Blue, false),
     ("user_list", "User List", icons::USER, ItemKind::Blue, true),
     ("device_list", "Device List", icons::DEVICE_INFO, ItemKind::Blue, true),
@@ -30,9 +30,23 @@ pub const MAIN_MENU: &[(&str, &str, Icon, ItemKind, bool)] = &[
     ("disk_usage", "Disk Usage", icons::INFORMATION, ItemKind::Blue, false),
     ("server_control", "Server Control", icons::SYSTEM_CONFIGURATION, ItemKind::Blue, true),
     ("bi_updates", "Update Blue Iris", icons::UPDATE, ItemKind::Blue, true),
-    ("help", "Help", icons::HELP, ItemKind::Golden, false),
+    ("help", "UI3 Help (web)", icons::HELP, ItemKind::Golden, false),
+    ("readme", "UI3 Native README", icons::INFORMATION, ItemKind::Golden, false),
     ("logout", "Log Out", icons::LOGOUT, ItemKind::Golden, false),
 ];
+
+/// The project's README, for the "UI3 Native README" menu item.
+const README_URL: &str = "https://github.com/jgrimard/ui3-native#readme";
+
+/// Menu labels UI3 used that were renamed here; settings saved under the old names keep working.
+pub fn canonical_action(a: &str) -> &str {
+    match a {
+        "About This UI" => "About UI3 Native",
+        "Copy Current URL" => "Copy UI3 Web Link",
+        "Help" => "UI3 Help (web)",
+        other => other,
+    }
+}
 
 /// Options for the "System Name Button Action" setting (`getSystemNameButtonOptions`).
 pub fn system_name_button_options(admin: bool) -> Vec<String> {
@@ -45,7 +59,8 @@ pub fn run_menu_command(view: &mut MainView, ctx: &egui::Context, svc: &mut Serv
         "about_this_ui" => view.dialogs.open(Dialog::About),
         "streaming_profiles" => view.dialogs.open(Dialog::StreamingProfiles),
         "copy_current_url" => {
-            // Mirrors `UpdateCurrentURL` (ui3.js:34727). `base_url` has no session argument, so nothing secret is copied.
+            // A link that opens the same view in the UI3 web interface (there is no native URL scheme). Mirrors
+            // `UpdateCurrentURL` (ui3.js:34727). `base_url` has no session argument, so nothing secret is copied.
             let base = view.client.base_url().to_string();
             let query = match &view.content {
                 crate::views::main_view::Content::Clip { key } => {
@@ -68,7 +83,7 @@ pub fn run_menu_command(view: &mut MainView, ctx: &egui::Context, svc: &mut Serv
                 _ => format!("t=live&group={}", view.home_group),
             };
             ctx.copy_text(format!("{base}ui3.htm?{query}"));
-            svc.toasts.info("URL copied to the clipboard");
+            svc.toasts.info("UI3 web link copied to the clipboard");
         }
         "system_log" => view.dialogs.open(Dialog::SystemLog),
         "user_list" => view.dialogs.open(Dialog::UserList),
@@ -78,7 +93,10 @@ pub fn run_menu_command(view: &mut MainView, ctx: &egui::Context, svc: &mut Serv
         "disk_usage" => view.dialogs.open(Dialog::ServerStatus),
         "server_control" => view.dialogs.open(Dialog::ServerControl),
         "bi_updates" => view.dialogs.open(Dialog::UpdateCheck),
-        "help" => ctx.open_url(egui::OpenUrl::new_tab(view.client.url("ui3/help/help.html"))),
+        // UI3's own help pages on the server, opened in the browser. Built from `base_url`, not `client.url()`:
+        // the session id must not be handed to the browser (the page asks for a login there if one is needed).
+        "help" => ctx.open_url(egui::OpenUrl::new_tab(format!("{}ui3/help/help.html", view.client.base_url()))),
+        "readme" => ctx.open_url(egui::OpenUrl::new_tab(README_URL)),
         "logout" => view.logout_requested = true,
         _ => {}
     }
@@ -132,7 +150,7 @@ pub fn show(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
         };
         let sys_w = SIDEBAR_W.min((full.width() - right_w) * 0.4).max(120.0);
         let sys_rect = Rect::from_min_size(full.min, vec2(sys_w, HEIGHT));
-        let action = svc.settings.str("ui3_system_name_button");
+        let action = canonical_action(&svc.settings.str("ui3_system_name_button")).to_string();
         let hot = action != "Do Nothing";
         let sys_resp = ui.interact(sys_rect, ui.id().with("sysname"), if hot { Sense::click() } else { Sense::hover() });
         let p = ui.painter();
@@ -244,7 +262,7 @@ pub fn show(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
                 }
                 "snapshot" => {
                     if w::icon_button(&mut cui, icons::SNAPSHOT, vec2(30.0, 24.0), vec2(13.0, 20.0), "Save image to disk").clicked() {
-                        crate::views::dialogs::save_snapshot(view, svc);
+                        crate::views::dialogs::save_snapshot(view, &ctx, svc);
                     }
                 }
                 _ => {

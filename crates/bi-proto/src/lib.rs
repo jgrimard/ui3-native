@@ -13,4 +13,6 @@ pub mod stream_writer;
 pub mod urls;
 
 pub use client::{BiClient, Credentials, Session};
+/// Re-exported for the response type of [`BiClient::open_stream`].
+pub use reqwest;
 pub use stream_parser::{StreamEvent, StreamParser, VideoCodec};

@@ -16,6 +16,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Decoded sound effects kept in memory.
+const MAX_CACHED_SOUNDS: usize = 32;
+
 #[derive(Default)]
 pub struct Events {
     last_status: Option<StatusBlock>,
@@ -111,6 +114,7 @@ impl Events {
 
     pub fn poll(&mut self, audio: &AudioOutput) {
         let mut done = Vec::new();
+        let mut failed = Vec::new();
         self.sound_jobs.retain_mut(|(f, j)| match j.poll() {
             Some(Ok(s)) => {
                 done.push((f.clone(), Arc::new(s)));
@@ -118,14 +122,21 @@ impl Events {
             }
             Some(Err(e)) => {
                 tracing::warn!("sound {f}: {e:#}");
+                failed.push(f.clone());
                 false
             }
             None => true,
         });
+        // A sound that could not be loaded is not owed a later playback.
+        self.queued_play.retain(|q| !failed.contains(q));
         for (f, s) in done {
             if let Some(i) = self.queued_play.iter().position(|q| *q == f) {
                 self.queued_play.remove(i);
                 audio.play_effect(&s);
+            }
+            // File names can arrive over MQTT, so the cache of decoded sounds is bounded.
+            if self.sounds.len() >= MAX_CACHED_SOUNDS {
+                self.sounds.clear();
             }
             self.sounds.insert(f, s);
         }
@@ -234,8 +245,14 @@ fn tts_thread(rx: std::sync::mpsc::Receiver<(String, String)>) {
         while let Ok((text, voice_name)) = rx.recv() {
             if voice_name != current_voice {
                 current_voice = voice_name.clone();
-                if let Some((_, tok)) = sapi_voice_tokens().into_iter().find(|(n, _)| *n == voice_name) {
-                    let _ = voice.SetVoice(&tok);
+                match sapi_voice_tokens().into_iter().find(|(n, _)| *n == voice_name) {
+                    Some((_, tok)) => {
+                        let _ = voice.SetVoice(&tok);
+                    }
+                    // Unknown or unset voice: back to the system default.
+                    None => {
+                        let _ = voice.SetVoice(None::<&windows::Win32::Media::Speech::ISpObjectToken>);
+                    }
                 }
             }
             let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
@@ -260,8 +277,9 @@ pub fn cam_is_considered_triggered(c: &CameraInfo, settings: &Settings) -> bool 
 #[cfg(test)]
 mod tests {
     #[test]
+    #[ignore = "depends on the machine: needs at least one installed SAPI voice"]
     fn lists_sapi_voices() {
-        // Windows ships at least one SAPI voice; an empty list means the enumeration is broken.
+        // Desktop Windows ships at least one SAPI voice; an empty list there means the enumeration is broken.
         let v = super::speech_voices();
         println!("voices: {v:?}");
         assert!(!v.is_empty());

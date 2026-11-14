@@ -18,8 +18,20 @@ pub struct Pending<T> {
     rx: Option<tokio::sync::oneshot::Receiver<T>>,
 }
 
-impl<T> Pending<T> {
-    /// Returns the value once ready (only once).
+/// A job result that can stand in for a task that died without producing one.
+pub trait Failable {
+    fn task_failed() -> Self;
+}
+
+impl<T> Failable for anyhow::Result<T> {
+    fn task_failed() -> Self {
+        Err(anyhow::anyhow!("the background task stopped unexpectedly"))
+    }
+}
+
+impl<T: Failable> Pending<T> {
+    /// Returns the value once ready (only once). A task that panicked reports an error instead of staying
+    /// pending forever.
     pub fn poll(&mut self) -> Option<T> {
         let rx = self.rx.as_mut()?;
         match rx.try_recv() {
@@ -30,7 +42,7 @@ impl<T> Pending<T> {
             Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
             Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                 self.rx = None;
-                None
+                Some(T::task_failed())
             }
         }
     }
@@ -48,7 +60,7 @@ pub fn spawn<T: Send + 'static>(ctx: &egui::Context, fut: impl Future<Output = T
     Pending { rx: Some(rx) }
 }
 
-/// Fire-and-forget; errors are reported through the returned channel-less log + toast sink.
+/// Fire-and-forget: nothing reports the outcome, so the future must handle (or log) its own errors.
 pub fn spawn_detached(fut: impl Future<Output = ()> + Send + 'static) {
     handle().spawn(fut);
 }

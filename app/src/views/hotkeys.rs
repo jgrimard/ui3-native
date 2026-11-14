@@ -33,8 +33,13 @@ fn group_cycle(view: &MainView, dir: i32) -> Option<String> {
 
 pub fn handle(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
     if ctx.egui_wants_keyboard_input() {
+        // A text field has the keyboard, so a held PTZ key would never deliver its release here.
+        view.ptz.release_hotkeys();
         return;
     }
+    // Like UI3 (`isInDialog`, ui3.js:35179), hotkeys do nothing while a dialog is open; this also keeps a key
+    // being captured for a hotkey setting from triggering whatever it was bound to.
+    let blocked = view.modal_open();
     let events: Vec<(egui::Key, bool, bool, egui::Modifiers)> = ctx.input(|i| {
         i.events.iter().filter_map(|e| if let egui::Event::Key { key, pressed, repeat, modifiers, .. } = e { Some((*key, *pressed, *repeat, *modifiers)) } else { None }).collect()
     });
@@ -45,6 +50,12 @@ pub fn handle(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
             continue;
         }
         let hk = |name: &str| svc.settings.hotkey(name).is_some_and(|h: Hotkey| h.matches(key, m));
+        if blocked {
+            if !view.dialogs.capturing_hotkey() && hk("ui3_hotkey_close_top_dialog") {
+                view.dialogs.close_top();
+            }
+            continue;
+        }
         // PTZ hold keys (no repeat).
         let ptz_keys = [
             ("ui3_hotkey_ptzUp", ptz::UP),
@@ -88,7 +99,7 @@ pub fn handle(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
             let v = !svc.settings.bool("ui3_cameraLabels_enabled");
             svc.settings.set_bool("ui3_cameraLabels_enabled", v);
         } else if hk("ui3_hotkey_downloadframe") {
-            crate::views::dialogs::save_snapshot(view, svc);
+            crate::views::dialogs::save_snapshot(view, ctx, svc);
         } else if hk("ui3_hotkey_toggleMute") {
             let mute = !svc.audio.muted();
             svc.audio.set_muted(mute);
@@ -134,7 +145,7 @@ pub fn handle(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
             view.playback.step_frame(ctx, &client, &mut view.player, svc, -1);
         } else if hk("ui3_hotkey_newerClip") || hk("ui3_hotkey_olderClip") {
             let dir = if hk("ui3_hotkey_olderClip") { 1 } else { -1 };
-            let cur = view.playback.clip.as_ref().map(|c| c.path.clone()).or_else(|| view.clips.focus.and_then(|i| view.clips.clips.get(i)).map(|c| c.path.clone()));
+            let cur = view.playback.clip.as_ref().map(|c| c.path.clone()).or_else(|| view.clips.focused().map(|c| c.path.clone()));
             let next = match cur {
                 Some(p) => view.clips.neighbor(&p, dir),
                 None => view.clips.clips.first().cloned(),
@@ -147,7 +158,7 @@ pub fn handle(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
                 }
             }
         } else if hk("ui3_hotkey_open_selected_clip") {
-            if let Some(c) = view.clips.focus.and_then(|i| view.clips.clips.get(i)).cloned() {
+            if let Some(c) = view.clips.focused().cloned() {
                 crate::views::playback::open_clip(view, ctx, svc, c);
             }
         } else if hk("ui3_hotkey_toggleFlag") {
@@ -163,7 +174,7 @@ pub fn handle(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
                     if svc.settings.delete_needs_confirm(items.len()) {
                         view.clips.delete_confirm = Some(items);
                     } else {
-                        view.clips.delete(ctx, &client, items);
+                        crate::views::clips::delete_items(view, ctx, svc, items);
                     }
                 }
             }
@@ -202,7 +213,7 @@ pub fn handle(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
         }
     }
     // Escape always restores from maximized video area / mini mode (UI3 behaviour).
-    if view.maximized && ctx.input(|i| i.key_pressed(egui::Key::Escape)) && view.dialogs.open.is_empty() {
+    if view.maximized && ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !blocked {
         if view.mini_mode {
             crate::views::controls::exit_mini_mode(view, ctx);
         }

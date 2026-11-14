@@ -43,6 +43,21 @@ pub enum EndReason {
     IdleTimeout,
 }
 
+impl std::fmt::Display for EndReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EndReason::Natural => f.write_str("the stream ended"),
+            EndReason::Eof => f.write_str("the server closed the stream"),
+            EndReason::SessionLost => f.write_str("the Blue Iris session expired"),
+            EndReason::Unavailable => f.write_str("the server reported the video is unavailable (HTTP 503)"),
+            EndReason::Http(code) => write!(f, "the server answered HTTP {code}"),
+            EndReason::Protocol(e) => write!(f, "unexpected stream data ({e})"),
+            EndReason::Network(e) => write!(f, "network error ({e})"),
+            EndReason::IdleTimeout => f.write_str("the server stopped sending video"),
+        }
+    }
+}
+
 /// Dropping or calling [`StreamHandle::stop`] cancels the stream.
 pub struct StreamHandle {
     task: Option<JoinHandle<()>>,
@@ -171,7 +186,7 @@ where
                 sink.send(StreamMessage::Jpeg { data: b, utc }).await;
                 Some(EndReason::Natural)
             }
-            Err(e) => Some(EndReason::Network(e.to_string())),
+            Err(e) => Some(EndReason::Network(e.without_url().to_string())),
         };
     }
     if !(200..300).contains(&status) {
@@ -183,7 +198,7 @@ where
         let chunk = match tokio::time::timeout(opts.idle_timeout, body.next()).await {
             Err(_) => return Some(EndReason::IdleTimeout),
             Ok(None) => return Some(EndReason::Eof),
-            Ok(Some(Err(e))) => return Some(EndReason::Network(e.to_string())),
+            Ok(Some(Err(e))) => return Some(EndReason::Network(e.without_url().to_string())),
             Ok(Some(Ok(c))) => c,
         };
         parser.push(&chunk);

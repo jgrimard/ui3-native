@@ -61,6 +61,17 @@ impl Toasts {
         tracing::warn!("{text}");
         self.items.push(Toast { level, text, until: None, key: Some(key) });
     }
+    /// Shows or updates a progress toast for `key` without logging each update. Ends with [`Self::clear_sticky`].
+    pub fn set_progress(&mut self, key: &'static str, text: impl Into<String>) {
+        let text = text.into();
+        if let Some(t) = self.items.iter_mut().find(|t| t.key == Some(key)) {
+            t.text = text;
+            return;
+        }
+        if !self.dismissed.contains(&key) {
+            self.items.push(Toast { level: Level::Info, text, until: None, key: Some(key) });
+        }
+    }
     /// Removes the sticky toast for `key`; returns whether one was showing (or had been dismissed).
     pub fn clear_sticky(&mut self, key: &'static str) -> bool {
         let n = self.items.len();

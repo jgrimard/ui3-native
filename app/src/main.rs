@@ -19,7 +19,12 @@ mod views;
 fn main() -> eframe::Result {
     let log_dir = settings::config_dir();
     let _ = std::fs::create_dir_all(&log_dir);
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(log_dir.join("ui3-native.log")).ok();
+    let log_path = log_dir.join("ui3-native.log");
+    // Keep the log bounded: past 5 MB the old log becomes ui3-native.log.old (replacing the previous one).
+    if std::fs::metadata(&log_path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+        let _ = std::fs::rename(&log_path, log_dir.join("ui3-native.log.old"));
+    }
+    let file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).ok();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,wgpu_core=warn,wgpu_hal=warn,naga=warn".into());
     match file {
         Some(f) => tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::sync::Mutex::new(f)).init(),

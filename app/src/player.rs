@@ -72,8 +72,6 @@ pub struct FrameMeta {
     pub pos: u16,
     pub utc_ms: u64,
     pub time_ms: i64,
-    #[allow(dead_code)]
-    pub keyframe: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -298,6 +296,8 @@ fn decode_thread(
     // Pixel count from the stream header, and whether placeholder frames are being held back.
     let mut pixels = 0f64;
     let mut holding = p.hold_placeholder;
+    // Codec whose decoder could not be created: reported once instead of retrying on every frame.
+    let mut failed_codec: Option<VideoCodec> = None;
 
     let publish = |shared: &Mutex<Shared>, f: DisplayFrame, meta: FrameMeta| {
         let mut s = shared.lock();
@@ -368,13 +368,19 @@ fn decode_thread(
                             continue;
                         }
                     }
+                    if failed_codec == Some(f.codec) {
+                        continue;
+                    }
                     if decoder.as_ref().is_none_or(|d| d.codec() != f.codec) {
                         let shared_dev = if accel != HwAccel::Software { zero_copy_device() } else { None };
                         decoder_zero_copy = shared_dev.is_some();
                         match VideoDecoder::new_with_device(f.codec, accel, None, shared_dev) {
                             Ok(d) => decoder = Some(d),
                             Err(e) => {
+                                tracing::error!("cannot create a {} decoder: {e:#}", f.codec.name());
                                 shared.lock().error = Some(format!("decoder: {e:#}"));
+                                decoder = None;
+                                failed_codec = Some(f.codec);
                                 continue;
                             }
                         }
@@ -388,6 +394,7 @@ fn decode_thread(
                     // Persistent hardware failures: fall back to software (e.g. unsupported profile).
                     if d.consecutive_errors() > 20 && accel != HwAccel::Software {
                         tracing::warn!("too many decode errors with hardware decoding; switching to software");
+                        failed_codec = None;
                         accel = HwAccel::Software;
                         decoder = None;
                         got_keyframe = false;
@@ -408,6 +415,7 @@ fn decode_thread(
                             let (base_t, base_pts) = *clock.get_or_insert((now + Duration::from_millis(60), pts));
                             let due = base_t + Duration::from_millis((pts - base_pts).max(0) as u64);
                             if due > now {
+                                shared.lock().stats.late_ms = 0.0;
                                 // Sleep in small steps so seeks/stops are responsive.
                                 let mut remaining = due - now;
                                 while remaining > Duration::ZERO {
@@ -431,7 +439,7 @@ fn decode_thread(
                             return;
                         }
                         frate.add(1.0);
-                        let meta = FrameMeta { pos: f.pos, utc_ms: f.utc_ms, time_ms: f.time_ms, keyframe: f.keyframe };
+                        let meta = FrameMeta { pos: f.pos, utc_ms: f.utc_ms, time_ms: f.time_ms };
                         {
                             let mut s = shared.lock();
                             s.stats.width = fw;

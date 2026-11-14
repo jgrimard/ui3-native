@@ -135,6 +135,57 @@ EXPR_DEFAULTS = {
     "ui3_mqttInstanceId": "",
 }
 
+# UI3 settings that have no effect in the native app (browser players, touch gestures, features that were not
+# ported). They keep their keys and defaults but are not shown in the settings dialog.
+NOT_IN_NATIVE = {
+    # Browser video players and their delay handling.
+    "ui3_edge_fetch_bug_h264_enable", "ui3_h264_choice4", "ui3_h264_choice_requires_restart",
+    "ui3_comment_h264_acceptable_delay", "ui3_h264_delay_threshold", "ui3_h264_html5_delay_threshold",
+    "ui3_h264_net_delay_threshold", "ui3_h264_reset_at_delay", "ui3_html5_delay_compensation",
+    "ui3_html5_enable_max_delay_limit", "ui3_html5_max_delay_ms", "ui3_web_audio_autoplay_warning",
+    "ui3_audio_buffer_ms", "ui3_jpegSupersampling", "ui3_browserZoomEnabled", "ui3_preferred_ui_scale",
+    "ui3_portrait_layout", "ui3_video_loading_animation", "ui3_video_loading_overlay",
+    # Touch and swipe input.
+    "ui3_allow_touch_swipe_gestures", "ui3_allow_mouse_swipe_gestures", "ui3_touch_gestures_reverse",
+    "ui3_alwaysAllow1xVideoZoom",
+    # Features that were not ported.
+    "ui3_mp4_open_action", "ui3_openARecording", "ui3_download_exports_automatically",
+    "ui3_show_update_available_notice", "ui3_dynamicGroupLayout", "ui3_maxDynamicGroupImageMegapixels",
+    "ui3_bypass_single_camera_groups", "ui3_ptz_controls_type", "ui3_experimental_joystick_api",
+    "ui3_contextMenus_trigger", "ui3_hires_jpeg_popups", "ui3_hires_jpeg_disables_preview_animation",
+    "ui3_clipPreview_navigation_buttons_enabled", "ui3_hotkey_preview_animation_up",
+    "ui3_hotkey_preview_animation_down", "ui3_hotkey_close_preview_animation",
+    "ui3_camera_overlay_icon_audio_trigger", "ui3_clipicon_is_new", "ui3_clipicon_trigger_sentry_occupied",
+    "ui3_icons_extraVisibility", "ui3_extra_playback_controls_padding",
+}
+
+# Wording that only made sense in a browser: key -> fields to replace (label / desc / hint).
+TEXT_OVERRIDES = {
+    "ui3_timeout": {"desc": "Video stops and waits for a click after this many minutes without input. (0 to disable)"},
+    "ui3_pause_when_hidden": {
+        "label": "Pause when minimized",
+        "hint": "When enabled, live video stops while the window is minimized and resumes when it is restored.\n"
+                "Disable to keep audio and event-triggered sounds playing while minimized.\nRecommended: enabled",
+    },
+    "ui3_show_picture_in_picture_button": {"hint": "Shows a button that shrinks the app to a small always-on-top window (mini mode)."},
+    "ui3_uiStatusSpeech": {"desc": "Connection changes are spoken with a Windows text-to-speech voice."},
+    "ui3_hotkey_maximizeVideoArea": {"hint": "Shows or hides the left and top control bars."},
+    "ui3_preventSleep": {"hint": "Keeps the display awake while UI3 Native is playing video."},
+}
+
+# Settings that exist only in the native app, as ready-made table lines inserted after the given UI3 key.
+NATIVE_EXTRAS = {
+    "ui3_streamingProfileBitRateMax": [
+        '    SettingDef { key: "ui3_streamingQualityDefault", default: Dv::Num(50.0), input: Input::Range { min: 1.0, max: 100.0, step: 1.0, unit: "%" }, '
+        'label: "Default Video Quality", desc: "", hint: "(Default: 50)\\n\\nQuality (q) sent to Blue Iris for streaming profiles that do not specify their own quality, '
+        'such as the Native profile. Profiles with an explicit quality are not affected.", category: "Video Player" },',
+    ],
+}
+
+def no_learn_more(s):
+    """UI3 appends "(learn more)" links to its help pages; there is nothing to click here."""
+    return re.sub(r"\s*\(learn more\)", "", s).strip()
+
 def rs(s):
     return json.dumps(s, ensure_ascii=False)
 
@@ -196,8 +247,22 @@ for body in objs:
     if key in FEATURE_TOGGLES:
         inp, label, cat = "Input::Checkbox", FEATURE_TOGGLES[key][0], FEATURE_TOGGLES[key][1]
         hint = "Enable or disable this interface feature."
+    label, desc = no_learn_more(label), no_learn_more(desc)
+    for f, v in TEXT_OVERRIDES.get(key, {}).items():
+        if f == "label":
+            label = v
+        elif f == "desc":
+            desc = v
+        elif f == "hint":
+            hint = v
+    # Comments UI3 fills in at runtime are empty here and would only add blank rows.
+    if key in NOT_IN_NATIVE or (kind == "comment" and not comment):
+        inp = "Input::Hidden"
     out.append(f"    SettingDef {{ key: {rs(key)}, default: {dv}, input: {inp}, label: {rs(label)}, desc: {rs(desc)}, hint: {rs(hint)}, category: {rs(cat)} }},")
     count += 1
+    for line in NATIVE_EXTRAS.get(key, []):
+        out.append(line)
+        count += 1
 out.append("];")
 open(dst, "w", encoding="utf-8", newline="\n").write("\n".join(out) + "\n")
 print(f"wrote {count} settings to {dst}")

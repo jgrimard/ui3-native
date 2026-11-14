@@ -37,7 +37,7 @@ on video:
 - **Zero-copy video.** Decoded frames stay on the GPU. The DirectX 12 renderer samples the decoder's NV12 textures
   directly, with an automatic fallback to system memory copies when shared textures aren't available.
 - **It still feels like UI3.** You get UI3's icon set, its five color themes, and the same top bar, side bar, clip
-  list, playback bar, timeline and dialogs, plus the full UI3 settings catalog and hotkeys.
+  list, playback bar, timeline and dialogs, plus UI3's settings and hotkeys.
 
 ## Features
 
@@ -82,8 +82,9 @@ on video:
     </td>
     <td width="50%" valign="top">
       <h3>⚙️ Everything UI3 can do</h3>
-      All of UI3's settings categories carry over: video player, clips/alerts, timeline, PTZ, hotkeys, event-triggered
-      sounds, status area, MQTT remote control and more. Each setting keeps its original description.
+      UI3's settings categories carry over: video player, clips/alerts, timeline, PTZ, hotkeys, event-triggered
+      sounds, status area, MQTT remote control and more, with their original descriptions. Settings that only
+      make sense in a browser (HTML5 player tuning, touch gestures and the like) are left out.
     </td>
   </tr>
 </table>
@@ -94,10 +95,10 @@ on video:
 |---|---|
 | **Video** | H.264 & H.265 (8- and 10-bit) hardware decode · direct-to-wire or server-transcoded streaming profiles · per-camera stream sizing · default video quality setting · FLAC / μ-law audio with volume control |
 | **PTZ** | Directional pad, zoom & focus · presets · 3D positioning (click / drag to aim) · virtual joystick and gamepad input · press-and-hold PTZ hotkeys |
-| **Export** | Server-side Convert/Export (AVI, MP4, WMV) with a queue window · **client-side MP4 export that keeps H.265**, remuxed locally with no re-encode |
+| **Export** | Server-side Convert/Export (AVI, MP4, WMV) with a queue window · **client-side MP4 export that keeps H.265**, remuxed locally with no re-encode (video only) |
 | **Server control** | Profile, schedule and hold/temp switching · trigger cameras · server status meters (CPU, RAM, disks, FPS) · log, users and devices views |
 | **Events** | Event-triggered sounds (motion, trigger, alert) · UI status sounds · Windows text-to-speech · toasts |
-| **Integration** | MQTT remote control (`ui3/<instance>/…`) to switch cameras, maximize, set volume, play sounds, speak text and show toasts. Works over WebSocket or plain TCP |
+| **Integration** | MQTT remote control (`ui3/<instance>/…`) to switch cameras, maximize, set volume, play sounds, speak text and show toasts. Works over WebSocket or TCP, plain or with TLS (`wss://`, `mqtts://`) |
 | **Look & feel** | Blue Iris 6, Blue Iris 6 Black, Blue Iris 5, Blue Iris 5 Black and legacy UI3 themes, or *Auto* (matches the server version) · 120 UI3 icons rendered as SVG |
 | **Desktop** | Saved servers with passwords in **Windows Credential Manager** · anonymous auto-login · idle timeout · remembers window size and position · fullscreen |
 
@@ -116,7 +117,8 @@ on video:
 3. Enter your Blue Iris address (for example `http://192.168.1.10:81`) and your credentials.
 
 Settings are stored in `%APPDATA%\UI3Native\config\settings.json`, and the log is written next to them as
-`ui3-native.log`. Passwords never touch disk in plain text: they're kept in Windows Credential Manager.
+`ui3-native.log` (rotated to `ui3-native.log.old` once it passes 5 MB). Passwords never touch disk in plain text:
+server and MQTT passwords are kept in Windows Credential Manager.
 
 > [!TIP]
 > Open **Streaming Quality** in the side bar and pick **Native (direct H.264/H.265)** to get the camera's original

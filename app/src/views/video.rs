@@ -206,7 +206,7 @@ pub fn show(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) -> Video
 
         draw_camera_labels(view, &painter, img_rect, frame_size, svc.settings);
         if matches!(view.content, Content::Live { .. }) {
-            draw_camera_overlay_icons(view, &painter, img_rect, frame_size, svc.settings);
+            draw_camera_overlay_icons(view, ui, &painter, img_rect, frame_size, svc.settings);
         }
         draw_status_icons(view, ui, area, svc.settings);
     } else {
@@ -288,7 +288,7 @@ fn draw_camera_labels(view: &MainView, painter: &egui::Painter, img_rect: Rect, 
 }
 
 /// Per-camera overlay icons within a group image (`ui3_camera_overlay_icon_*`), from camera-list state.
-fn draw_camera_overlay_icons(view: &MainView, painter: &egui::Painter, img_rect: Rect, frame_size: Option<[u32; 2]>, s: &Settings) {
+fn draw_camera_overlay_icons(view: &MainView, ui: &egui::Ui, painter: &egui::Painter, img_rect: Rect, frame_size: Option<[u32; 2]>, s: &Settings) {
     let (rects, native) = camera_rects(view, frame_size);
     if rects.len() < 2 {
         return;
@@ -302,19 +302,20 @@ fn draw_camera_overlay_icons(view: &MainView, painter: &egui::Painter, img_rect:
         let sy = img_rect.height() / native[1];
         let mut x = img_rect.min.x + r[2] as f32 * sx - size * 0.7;
         let y = img_rect.min.y + r[1] as f32 * sy + size * 0.7;
-        let mut icon = |on: bool, key: &str, glyph: &str, color: Color32| {
+        // The same SVG icons UI3 uses for these states, on a dark disc so they read over any picture.
+        let mut icon = |on: bool, key: &str, glyph: crate::icons::Icon, color: Color32| {
             if on && s.bool(key) {
                 painter.circle_filled(pos2(x, y), size * 0.55, Color32::from_black_alpha(140));
-                painter.text(pos2(x, y), Align2::CENTER_CENTER, glyph, FontId::proportional(size * 0.8), color);
+                crate::views::w::paint_icon(ui, glyph, Rect::from_center_size(pos2(x, y), vec2(size * 0.7, size * 0.7)), color);
                 x -= size * 1.2;
             }
         };
-        icon(cam.is_motion && !cam.is_triggered, "ui3_camera_overlay_icon_motion_trigger", "🏃", style::MOTION_ORANGE);
-        icon(cam.is_triggered, "ui3_camera_overlay_icon_generic_trigger", "⚡", style::REC_RED);
-        icon(cam.is_recording, "ui3_camera_overlay_icon_recording", "⏺", style::REC_RED);
-        icon(cam.is_paused, "ui3_camera_overlay_icon_paused", "⏸", Color32::LIGHT_BLUE);
-        icon(!cam.webcast(), "ui3_camera_overlay_icon_webcasting_disabled", "🚫", Color32::GRAY);
-        icon(cam.newalerts > 0, "ui3_camera_overlay_icon_new_alerts", "🔔", Color32::from_rgb(0xFF, 0xD5, 0x4F));
+        icon(cam.is_motion && !cam.is_triggered, "ui3_camera_overlay_icon_motion_trigger", crate::icons::RUN, style::MOTION_ORANGE);
+        icon(cam.is_triggered, "ui3_camera_overlay_icon_generic_trigger", crate::icons::ALERT1, style::REC_RED);
+        icon(cam.is_recording, "ui3_camera_overlay_icon_recording", crate::icons::STOPLIGHT, style::REC_RED);
+        icon(cam.is_paused, "ui3_camera_overlay_icon_paused", crate::icons::PAUSE, Color32::LIGHT_BLUE);
+        icon(!cam.webcast(), "ui3_camera_overlay_icon_webcasting_disabled", crate::icons::VISIBILITY_OFF, Color32::GRAY);
+        icon(cam.newalerts > 0, "ui3_camera_overlay_icon_new_alerts", crate::icons::ALERT, Color32::from_rgb(0xFF, 0xD5, 0x4F));
     }
 }
 
@@ -328,11 +329,12 @@ fn draw_status_icons(view: &MainView, ui: &egui::Ui, area: Rect, s: &Settings) {
         (st.motion, "ui3_icon_motion", crate::icons::RUN, Color32::from_rgb(120, 205, 255), "Motion is detected"),
     ];
     let mut x = area.right() - 5.0;
-    for (on, key, icon, color, _tip) in icons {
+    for (on, key, icon, color, tip) in icons {
         if !on || !s.bool(key) {
             continue;
         }
         let r = Rect::from_min_size(pos2(x - 40.0, area.top() + 5.0), vec2(40.0, 40.0));
+        ui.interact(r, ui.id().with(("corner_status", key)), Sense::hover()).on_hover_text(tip);
         let ir = r.shrink(5.0);
         crate::views::w::paint_icon(ui, icon, ir.translate(vec2(1.0, 1.0)), Color32::from_black_alpha(200));
         crate::views::w::paint_icon(ui, icon, ir, color);

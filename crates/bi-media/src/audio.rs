@@ -4,7 +4,7 @@
 //! or FLAC chunks (`audio=2`). Samples are resampled (linear) to the output device rate and fed through a
 //! lock-free ring buffer to a WASAPI stream owned by a dedicated thread (cpal streams are not `Send`).
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -46,6 +46,8 @@ struct Shared {
     queued: AtomicU64,
     clear: AtomicBool,
     fx_volume_bits: AtomicU32,
+    /// Set by the stream's error callback (device unplugged or reconfigured); the audio thread rebuilds the stream.
+    failed: AtomicBool,
 }
 
 /// Global audio output. Cheap to clone.
@@ -80,6 +82,7 @@ impl AudioOutput {
             queued: AtomicU64::new(0),
             clear: AtomicBool::new(false),
             fx_volume_bits: AtomicU32::new(1.0f32.to_bits()),
+            failed: AtomicBool::new(false),
         });
         let producer = Arc::new(Mutex::new(None));
         let fx = Arc::new(Mutex::new(None));
@@ -88,17 +91,24 @@ impl AudioOutput {
         std::thread::Builder::new()
             .name("audio-out".into())
             .spawn(move || {
-                match build_stream(shared, producer, fx) {
-                    Ok(stream) => {
-                        let _ = tx.send(Ok(()));
-                        // Keep the stream alive for the lifetime of the process.
-                        loop {
-                            std::thread::park();
-                            let _ = &stream;
+                // The stream lives on this thread for the lifetime of the process. It is rebuilt after a stream
+                // error (device unplugged or reconfigured), and looked for again every few seconds while there is
+                // no output device at all.
+                let mut stream = build_stream(shared.clone(), producer.clone(), fx.clone());
+                let _ = tx.send(stream.as_ref().map(|_| ()).map_err(|e| anyhow!("{e:#}")));
+                let mut last_try = std::time::Instant::now();
+                loop {
+                    std::thread::park_timeout(std::time::Duration::from_secs(1));
+                    let failed = shared.failed.swap(false, Ordering::Relaxed);
+                    if failed || (stream.is_err() && last_try.elapsed() > std::time::Duration::from_secs(5)) {
+                        last_try = std::time::Instant::now();
+                        // Close the old stream before opening the new one.
+                        drop(stream);
+                        shared.queued.store(0, Ordering::Relaxed);
+                        stream = build_stream(shared.clone(), producer.clone(), fx.clone());
+                        if failed && let Err(e) = &stream {
+                            tracing::warn!("audio output lost: {e:#}");
                         }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e));
                     }
                 }
             })
@@ -194,7 +204,10 @@ impl AudioOutput {
         if let Some(max) = max_latency_ms
             && self.buffered_ms() > max
         {
+            // The output callback empties the ring on its next run; anything queued before that would be thrown
+            // away with the backlog, so this block is dropped too.
             self.clear();
+            return;
         }
         let dst_rate = self.device_rate();
         let ch = self.shared.channels.load(Ordering::Relaxed).max(1) as usize;
@@ -285,10 +298,14 @@ fn build_stream(shared: Arc<Shared>, producer_slot: Arc<Mutex<Option<rtrb::Produ
         }
         sh.peak_bits.store(peak.to_bits(), Ordering::Relaxed);
         let frames = (avail / channels) as u64;
-        let q = sh.queued.load(Ordering::Relaxed);
-        sh.queued.store(q.saturating_sub(frames), Ordering::Relaxed);
+        let _ = sh.queued.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |q| Some(q.saturating_sub(frames)));
     };
-    let err = |e| tracing::error!("audio stream error: {e}");
+    let on_error = |sh: Arc<Shared>| {
+        move |e: cpal::Error| {
+            tracing::error!("audio stream error: {e}");
+            sh.failed.store(true, Ordering::Relaxed);
+        }
+    };
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => device.build_output_stream::<f32, _, _>(
             config,
@@ -298,7 +315,7 @@ fn build_stream(shared: Arc<Shared>, producer_slot: Arc<Mutex<Option<rtrb::Produ
                 // Two closures write the same buffer at disjoint times (set, then add).
                 fill(&mut |i, v| unsafe { *p.add(i) = v }, &mut |i, v| unsafe { *p.add(i) += v }, len)
             },
-            err,
+            on_error(shared.clone()),
             None,
         )?,
         cpal::SampleFormat::I16 => device.build_output_stream::<i16, _, _>(
@@ -312,7 +329,7 @@ fn build_stream(shared: Arc<Shared>, producer_slot: Arc<Mutex<Option<rtrb::Produ
                     len,
                 )
             },
-            err,
+            on_error(shared.clone()),
             None,
         )?,
         f => return Err(anyhow!("unsupported output sample format {f:?}")),
@@ -322,36 +339,99 @@ fn build_stream(shared: Arc<Shared>, producer_slot: Arc<Mutex<Option<rtrb::Produ
     Ok(stream)
 }
 
+/// Container formats accepted for sound effects. Sound files come from the Blue Iris server, so FFmpeg is not
+/// allowed to pick playlist-style demuxers that open other files or URLs.
+const SOUND_FORMATS: &std::ffi::CStr = c"wav,mp3,ogg,flac,aiff,aac";
+/// Longest sound effect kept, in seconds (bounds memory for a mislabelled long recording).
+const SOUND_MAX_SECONDS: usize = 60;
+
 /// Decodes an audio file (wav/mp3/...) with FFmpeg into interleaved f32 at the given rate and channel count.
 pub fn decode_sound_file(path: &std::path::Path, rate: u32, channels: u16) -> Result<Vec<f32>> {
     use ffmpeg_sys_next as ff;
     use std::ptr;
+
+    /// Frees whatever was allocated, on every exit path.
+    struct Guard {
+        fmt: *mut ff::AVFormatContext,
+        ctx: *mut ff::AVCodecContext,
+        swr: *mut ff::SwrContext,
+        pkt: *mut ff::AVPacket,
+        frame: *mut ff::AVFrame,
+        out_layout: ff::AVChannelLayout,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            unsafe {
+                ff::av_frame_free(&mut self.frame);
+                ff::av_packet_free(&mut self.pkt);
+                ff::swr_free(&mut self.swr);
+                ff::av_channel_layout_uninit(&mut self.out_layout);
+                ff::avcodec_free_context(&mut self.ctx);
+                ff::avformat_close_input(&mut self.fmt);
+            }
+        }
+    }
+
+    if rate == 0 || channels == 0 {
+        bail!("no audio output format");
+    }
     unsafe {
         let cpath = std::ffi::CString::new(path.to_string_lossy().as_bytes())?;
-        let mut fmt: *mut ff::AVFormatContext = ptr::null_mut();
-        if ff::avformat_open_input(&mut fmt, cpath.as_ptr(), ptr::null(), ptr::null_mut()) < 0 {
-            return Err(anyhow!("cannot open {}", path.display()));
+        let mut g = Guard { fmt: ptr::null_mut(), ctx: ptr::null_mut(), swr: ptr::null_mut(), pkt: ptr::null_mut(), frame: ptr::null_mut(), out_layout: std::mem::zeroed() };
+        let mut opts: *mut ff::AVDictionary = ptr::null_mut();
+        ff::av_dict_set(&mut opts, c"format_whitelist".as_ptr(), SOUND_FORMATS.as_ptr(), 0);
+        ff::av_dict_set(&mut opts, c"protocol_whitelist".as_ptr(), c"file".as_ptr(), 0);
+        let r = ff::avformat_open_input(&mut g.fmt, cpath.as_ptr(), ptr::null(), &mut opts);
+        ff::av_dict_free(&mut opts);
+        if r < 0 {
+            bail!("cannot open {} as a sound file: {}", path.display(), crate::decoder::av_err(r));
         }
-        ff::avformat_find_stream_info(fmt, ptr::null_mut());
-        let idx = ff::av_find_best_stream(fmt, ff::AVMediaType::AVMEDIA_TYPE_AUDIO, -1, -1, ptr::null_mut(), 0);
+        let r = ff::avformat_find_stream_info(g.fmt, ptr::null_mut());
+        if r < 0 {
+            bail!("avformat_find_stream_info: {}", crate::decoder::av_err(r));
+        }
+        let idx = ff::av_find_best_stream(g.fmt, ff::AVMediaType::AVMEDIA_TYPE_AUDIO, -1, -1, ptr::null_mut(), 0);
         if idx < 0 {
-            ff::avformat_close_input(&mut fmt);
-            return Err(anyhow!("no audio stream"));
+            bail!("no audio stream");
         }
-        let st = *(*fmt).streams.add(idx as usize);
+        let st = *(*g.fmt).streams.add(idx as usize);
         let dec = ff::avcodec_find_decoder((*(*st).codecpar).codec_id);
-        let mut ctx = ff::avcodec_alloc_context3(dec);
-        ff::avcodec_parameters_to_context(ctx, (*st).codecpar);
-        ff::avcodec_open2(ctx, dec, ptr::null_mut());
-        let mut swr: *mut ff::SwrContext = ptr::null_mut();
-        let mut out_layout: ff::AVChannelLayout = std::mem::zeroed();
-        ff::av_channel_layout_default(&mut out_layout, channels as i32);
-        ff::swr_alloc_set_opts2(&mut swr, &out_layout, ff::AVSampleFormat::AV_SAMPLE_FMT_FLT, rate as i32, &(*ctx).ch_layout, (*ctx).sample_fmt, (*ctx).sample_rate, 0, ptr::null_mut());
-        ff::swr_init(swr);
-        let mut pkt = ff::av_packet_alloc();
-        let mut frame = ff::av_frame_alloc();
+        if dec.is_null() {
+            bail!("no decoder for this sound file's codec");
+        }
+        g.ctx = ff::avcodec_alloc_context3(dec);
+        if g.ctx.is_null() {
+            bail!("avcodec_alloc_context3 failed");
+        }
+        let r = ff::avcodec_parameters_to_context(g.ctx, (*st).codecpar);
+        if r < 0 {
+            bail!("avcodec_parameters_to_context: {}", crate::decoder::av_err(r));
+        }
+        let r = ff::avcodec_open2(g.ctx, dec, ptr::null_mut());
+        if r < 0 {
+            bail!("avcodec_open2: {}", crate::decoder::av_err(r));
+        }
+        if (*g.ctx).ch_layout.nb_channels <= 0 || (*g.ctx).sample_rate <= 0 {
+            bail!("sound file has no usable audio format");
+        }
+        ff::av_channel_layout_default(&mut g.out_layout, channels as i32);
+        let r = ff::swr_alloc_set_opts2(&mut g.swr, &g.out_layout, ff::AVSampleFormat::AV_SAMPLE_FMT_FLT, rate as i32, &(*g.ctx).ch_layout, (*g.ctx).sample_fmt, (*g.ctx).sample_rate, 0, ptr::null_mut());
+        if r < 0 || g.swr.is_null() {
+            bail!("swr_alloc_set_opts2: {}", crate::decoder::av_err(r));
+        }
+        let r = ff::swr_init(g.swr);
+        if r < 0 {
+            bail!("swr_init: {}", crate::decoder::av_err(r));
+        }
+        g.pkt = ff::av_packet_alloc();
+        g.frame = ff::av_frame_alloc();
+        if g.pkt.is_null() || g.frame.is_null() {
+            bail!("out of memory");
+        }
+        let (swr, frame, pkt) = (g.swr, g.frame, g.pkt);
+        let limit = rate as usize * channels as usize * SOUND_MAX_SECONDS;
         let mut out: Vec<f32> = Vec::new();
-        let drain = |frame: *mut ff::AVFrame, out: &mut Vec<f32>| {
+        let drain = |out: &mut Vec<f32>| {
             let max = ff::swr_get_out_samples(swr, (*frame).nb_samples).max(0) as usize;
             let mut buf = vec![0f32; max * channels as usize];
             let dst = buf.as_mut_ptr() as *mut u8;
@@ -360,24 +440,22 @@ pub fn decode_sound_file(path: &std::path::Path, rate: u32, channels: u16) -> Re
                 out.extend_from_slice(&buf[..n as usize * channels as usize]);
             }
         };
-        while ff::av_read_frame(fmt, pkt) >= 0 {
-            if (*pkt).stream_index == idx && ff::avcodec_send_packet(ctx, pkt) >= 0 {
-                while ff::avcodec_receive_frame(ctx, frame) >= 0 {
-                    drain(frame, &mut out);
+        while out.len() < limit && ff::av_read_frame(g.fmt, pkt) >= 0 {
+            if (*pkt).stream_index == idx && ff::avcodec_send_packet(g.ctx, pkt) >= 0 {
+                while ff::avcodec_receive_frame(g.ctx, frame) >= 0 {
+                    drain(&mut out);
                 }
             }
             ff::av_packet_unref(pkt);
         }
-        ff::avcodec_send_packet(ctx, ptr::null());
-        while ff::avcodec_receive_frame(ctx, frame) >= 0 {
-            drain(frame, &mut out);
+        ff::avcodec_send_packet(g.ctx, ptr::null());
+        while out.len() < limit && ff::avcodec_receive_frame(g.ctx, frame) >= 0 {
+            drain(&mut out);
         }
-        ff::av_frame_free(&mut frame);
-        ff::av_packet_free(&mut pkt);
-        ff::swr_free(&mut swr);
-        ff::av_channel_layout_uninit(&mut out_layout);
-        ff::avcodec_free_context(&mut ctx);
-        ff::avformat_close_input(&mut fmt);
+        out.truncate(limit);
+        if out.is_empty() {
+            bail!("sound file decoded to no audio");
+        }
         Ok(out)
     }
 }
@@ -392,5 +470,40 @@ mod tests {
         assert_eq!(mulaw_to_linear(0x7F), 0);
         assert_eq!(mulaw_to_linear(0x00), -32124);
         assert_eq!(mulaw_to_linear(0x80), 32124);
+    }
+
+    #[test]
+    fn sound_decoder_rejects_playlists_and_decodes_wav() {
+        let dir = std::env::temp_dir().join(format!("ui3n-sound-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A playlist that points at another file must not be followed.
+        let playlist = dir.join("evil.wav");
+        std::fs::write(&playlist, "#EXTM3U\n#EXTINF:1,\nfile:///C:/Windows/win.ini\n").unwrap();
+        assert!(decode_sound_file(&playlist, 48000, 2).is_err());
+        // Not audio at all.
+        let junk = dir.join("junk.wav");
+        std::fs::write(&junk, vec![0x5Au8; 4096]).unwrap();
+        assert!(decode_sound_file(&junk, 48000, 2).is_err());
+        // A real 8 kHz mono 16-bit WAV of 800 samples becomes about 0.1 s of 48 kHz stereo.
+        let mut wav = Vec::new();
+        let data: Vec<u8> = (0..800i32).flat_map(|i| (((i % 40) - 20) as i16 * 1000).to_le_bytes()).collect();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        let good = dir.join("tone.wav");
+        std::fs::write(&good, wav).unwrap();
+        let pcm = decode_sound_file(&good, 48000, 2).unwrap();
+        assert!((8000..=10000).contains(&pcm.len()), "{}", pcm.len());
+        assert!(pcm.iter().any(|v| v.abs() > 0.1));
     }
 }

@@ -200,21 +200,6 @@ pub fn timeline_frame_jpeg(id: &str, opaque: &str, pos_utc_ms: i64, jump: i32, q
     s
 }
 
-/// Control a running timeline stream: `time/set?opaque=..&speed=..|&pos=..|&jump=..`.
-pub fn timeline_set(opaque: &str, speed: Option<i32>, pos: Option<i64>, jump: Option<i32>) -> String {
-    let mut s = format!("time/set?opaque={}", encode(opaque));
-    if let Some(v) = speed {
-        let _ = write!(s, "&speed={v}");
-    }
-    if let Some(v) = pos {
-        let _ = write!(s, "&pos={v}");
-    }
-    if let Some(v) = jump {
-        let _ = write!(s, "&jump={v}");
-    }
-    s
-}
-
 /// Live JPEG: `image/<id>?...`.
 pub fn live_jpeg(id: &str, profile_args: &str, group_args: &str, overlay_args: &str, nocache: u64) -> String {
     format!("image/{}?nc={}{}{}{}", encode(id), nocache, profile_args, group_args, overlay_args).replace("?&", "?")

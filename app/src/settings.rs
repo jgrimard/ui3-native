@@ -1,6 +1,7 @@
 //! Settings store. Mirrors UI3's `settings` object (string-valued localStorage keys with defaults from
 //! `defaultSettings`, ui3.js:942) so behaviour and the settings panel match UI3 one-to-one.
-//! Persisted as JSON in %APPDATA%\UI3Native\settings.json.
+//! Persisted as JSON in %APPDATA%\UI3Native\config\settings.json. Password settings are kept in Windows
+//! Credential Manager instead of the file.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -87,7 +88,21 @@ pub struct Settings {
     pub native: NativeOptions,
     #[serde(skip)]
     dirty: bool,
+    /// When the settings last changed, so a burst of changes (a slider drag) is written once.
+    #[serde(skip)]
+    dirty_at: Option<std::time::Instant>,
+    /// Values of `Input::Password` settings, held in memory and stored in Windows Credential Manager.
+    #[serde(skip)]
+    secrets: BTreeMap<String, String>,
+    /// Set by [`Settings::load`] when the settings file was unreadable; shown once as a toast.
+    #[serde(skip)]
+    pub load_warning: Option<String>,
 }
+
+/// Changes are written this long after the last one.
+const SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
+/// Credential Manager "server" part for password settings (target `UI3Native:settings|<key>`).
+const SECRET_SERVER: &str = "settings";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -98,8 +113,8 @@ pub struct NativeOptions {
     pub client_side_grid: bool,
     /// Sub-stream (decode=-1) for client-side grid tiles.
     pub grid_use_substream: bool,
-    /// Cache this many scrub JPEGs per clip for instant re-scrubbing.
-    pub scrub_cache_frames: usize,
+    /// Memory budget (MiB) for decoded scrub frames kept for instant re-scrubbing.
+    pub scrub_cache_mb: usize,
     pub show_stats_overlay: bool,
     /// Render hardware-decoded frames straight from the decoder's GPU textures (no copy through system memory).
     pub zero_copy: bool,
@@ -109,7 +124,7 @@ pub struct NativeOptions {
 
 impl Default for NativeOptions {
     fn default() -> Self {
-        NativeOptions { hw_decode: "Auto".into(), client_side_grid: false, grid_use_substream: true, scrub_cache_frames: 400, show_stats_overlay: false, zero_copy: true, timeline_inertia: true }
+        NativeOptions { hw_decode: "Auto".into(), client_side_grid: false, grid_use_substream: true, scrub_cache_mb: 256, show_stats_overlay: false, zero_copy: true, timeline_inertia: true }
     }
 }
 
@@ -127,38 +142,118 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        let mut s: Settings = std::fs::read_to_string(Self::path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let path = Self::path();
+        let mut warning = None;
+        let mut s: Settings = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Keep the unreadable file instead of silently overwriting it with defaults.
+                    let bad = path.with_extension("json.bad");
+                    let kept = std::fs::rename(&path, &bad).is_ok();
+                    tracing::error!("settings file {} is not valid ({e}); starting from defaults", path.display());
+                    warning = Some(if kept {
+                        format!("The settings file could not be read and was reset to defaults.\nThe old file was kept as {}", bad.display())
+                    } else {
+                        "The settings file could not be read and was reset to defaults.".to_string()
+                    });
+                    Settings::default()
+                }
+            },
+            Err(_) => Settings::default(),
+        };
+        s.load_warning = warning;
         if s.streaming_profiles.is_empty() {
             s.streaming_profiles = default_profiles();
         }
+        s.load_secrets();
         s
     }
 
+    /// Moves password settings out of the JSON values (older versions stored them there in plain text) into
+    /// Windows Credential Manager, and reads the stored ones back into memory.
+    fn load_secrets(&mut self) {
+        for d in DEFS.iter().filter(|d| matches!(d.input, Input::Password)) {
+            if let Some(v) = self.values.remove(d.key) {
+                self.touch();
+                if let Value::String(v) = v
+                    && !v.is_empty()
+                    && let Err(e) = crate::creds::save_password(SECRET_SERVER, d.key, &v)
+                {
+                    tracing::error!("moving {} to Credential Manager: {e}", d.key);
+                }
+            }
+            if let Some(v) = crate::creds::load_password(SECRET_SERVER, d.key) {
+                self.secrets.insert(d.key.to_string(), v);
+            }
+        }
+    }
+
+    /// Value of a password setting (never written to the settings file).
+    pub fn secret(&self, key: &str) -> String {
+        self.secrets.get(key).cloned().unwrap_or_default()
+    }
+
+    pub fn set_secret(&mut self, key: &str, value: &str) {
+        if self.secret(key) == value {
+            return;
+        }
+        if value.is_empty() {
+            self.secrets.remove(key);
+            crate::creds::delete_password(SECRET_SERVER, key);
+        } else {
+            self.secrets.insert(key.to_string(), value.to_string());
+            if let Err(e) = crate::creds::save_password(SECRET_SERVER, key, value) {
+                tracing::error!("saving {key} to Credential Manager: {e}");
+            }
+        }
+    }
+
+    /// Writes the file now. On failure the settings stay dirty and the write is retried later.
     pub fn save(&mut self) {
         let path = Self::path();
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        match serde_json::to_string_pretty(self) {
-            Ok(t) => {
-                let tmp = path.with_extension("json.tmp");
-                if std::fs::write(&tmp, t).is_ok() {
-                    let _ = std::fs::rename(&tmp, &path);
-                }
-                self.dirty = false;
+        let text = match serde_json::to_string_pretty(self) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("saving settings: {e}");
+                return;
             }
-            Err(e) => tracing::error!("saving settings: {e}"),
+        };
+        let tmp = path.with_extension("json.tmp");
+        match std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &path)) {
+            Ok(()) => {
+                self.dirty = false;
+                self.dirty_at = None;
+            }
+            Err(e) => {
+                tracing::error!("saving settings to {}: {e}", path.display());
+                // Try again in half a minute rather than on every frame.
+                self.dirty_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+            }
         }
     }
 
+    /// Saves once the settings have been unchanged for a moment.
     pub fn save_if_dirty(&mut self) {
-        if self.dirty {
+        if self.dirty && self.dirty_at.is_none_or(|t| t.elapsed() >= SAVE_DEBOUNCE) {
             self.save();
         }
     }
 
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     pub fn mark_dirty(&mut self) {
+        self.touch();
+    }
+
+    fn touch(&mut self) {
         self.dirty = true;
+        self.dirty_at = Some(std::time::Instant::now());
     }
 
     fn default_value(key: &str) -> Value {
@@ -218,7 +313,7 @@ impl Settings {
         let v = v.into();
         if self.values.get(key) != Some(&v) {
             self.values.insert(key.to_string(), v);
-            self.dirty = true;
+            self.touch();
         }
     }
 
@@ -228,7 +323,7 @@ impl Settings {
 
     pub fn reset(&mut self, key: &str) {
         if self.values.remove(key).is_some() {
-            self.dirty = true;
+            self.touch();
         }
     }
 

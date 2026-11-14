@@ -4,8 +4,9 @@
 //! Blue Iris sends one complete Annex-B access unit per video block, so packets go straight to the decoder
 //! without a bitstream parser.
 //!
-//! Output is always NV12 in system memory (Phase A of the plan); hardware frames are downloaded with
-//! `av_hwframe_transfer_data`, anything that is not NV12 (software yuv420p, 10-bit P010, yuvj420p...) is
+//! Output is either a GPU frame (zero-copy, when the decoder shares the renderer's D3D11 device, see
+//! [`crate::d3d`]) or NV12 in system memory: hardware frames are then downloaded with
+//! `av_hwframe_transfer_data`, and anything that is not NV12 (software yuv420p, 10-bit P010, yuvj420p...) is
 //! converted with swscale.
 
 use anyhow::{Result, anyhow, bail};

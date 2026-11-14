@@ -31,13 +31,17 @@ pub struct Services<'a> {
 impl UiApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::views::style::apply(&cc.egui_ctx);
-        let settings = Settings::load();
+        let mut settings = Settings::load();
+        let mut toasts = Toasts::default();
+        if let Some(w) = settings.load_warning.take() {
+            toasts.warn(w);
+        }
         let audio = AudioOutput::open();
         audio.set_volume(settings.f64("ui3_audioVolume") as f32);
         audio.set_muted(settings.bool("ui3_audioMute"));
-        let gpu = cc.wgpu_render_state.as_ref().map(|_| ()).and_then(|_| None::<Gpu>);
+        // The GPU handle comes from the first frame (see `ui`).
         let login = LoginView::new(&settings);
-        UiApp { settings, audio, gpu, toasts: Toasts::default(), screen: Screen::Login(login) }
+        UiApp { settings, audio, gpu: None, toasts, screen: Screen::Login(login) }
     }
 }
 
@@ -76,6 +80,10 @@ impl eframe::App for UiApp {
         }
         self.toasts.show(&ctx);
         self.settings.save_if_dirty();
+        if self.settings.is_dirty() {
+            // The save is debounced; make sure a frame comes around to do it.
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
     }
 
     fn on_exit(&mut self) {

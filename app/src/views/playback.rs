@@ -65,8 +65,9 @@ impl Playback {
             position_ms: 0,
             opened_at_ms: 0,
             drag: None,
-            scrub: ScrubLoader::new(settings.native.scrub_cache_frames),
-            hint: ScrubLoader::new(64),
+            scrub: ScrubLoader::new(settings.native.scrub_cache_mb),
+            // Seek-bar hint thumbnails are 160 px wide; a few megabytes hold hundreds.
+            hint: ScrubLoader::new(16),
             hint_tex: None,
             stats_job: None,
             frame_ms: 100,
@@ -290,8 +291,11 @@ pub fn update(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
             } else {
                 view.playback.paused = true;
             }
+        } else if reason == EndReason::SessionLost {
+            // Log in again; `MainView::poll_background` reopens the clip where it stopped.
+            view.recover_session(ctx);
         } else {
-            svc.toasts.warn(format!("Playback stopped: {reason:?}"));
+            svc.toasts.warn(format!("Playback stopped: {reason}."));
             view.playback.paused = true;
         }
     }

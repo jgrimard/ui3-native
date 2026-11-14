@@ -3,7 +3,6 @@
 //! preview animation) and `ClipListContextMenu`.
 
 use crate::app::Services;
-use crate::gpu::Gpu;
 use crate::runtime::{self, Pending};
 use crate::settings::Settings;
 use crate::views::main_view::{Content, MainView};
@@ -63,8 +62,10 @@ pub struct ClipsPanel {
     thumb_queue: VecDeque<String>,
     thumb_jobs: Vec<(String, Pending<Result<egui::ColorImage>>)>,
     pub selected: HashSet<String>,
-    pub focus: Option<usize>,
-    anchor: Option<usize>,
+    /// Paths (not list indices: the list reloads and shifts under them) of the last clicked clip and of the
+    /// anchor for shift-click range selection.
+    focus: Option<String>,
+    anchor: Option<String>,
     preview: Option<Preview>,
     last_refresh: Instant,
     scroll_to: Option<usize>,
@@ -114,13 +115,14 @@ impl ClipsPanel {
             let e = self.date_end.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp() - self.tz_offset_ms / 1000;
             (s, e)
         } else {
-            // UI3 loads everything with paging when no date filter is set; bound it to make continuation work.
+            // Like UI3 (`allowContinuation`, ui3.js:13680), an unbounded request returns the newest 1000 items and
+            // is not continued; paging only happens inside a date range.
             (0, 0)
         };
         ClipQuery { camera: camera.to_string(), start, end, view: self.db_view.clone(), search: self.search_applied.clone(), tiles: false }
     }
 
-    pub fn ensure_loaded(&mut self, ctx: &egui::Context, client: &BiClient, settings: &Settings, home_group: &str) {
+    pub fn ensure_loaded(&mut self, ctx: &egui::Context, client: &BiClient, home_group: &str) {
         let cam = if self.camera_filter.is_empty() { home_group.to_string() } else { self.camera_filter.clone() };
         let key = (cam.clone(), self.db_view.clone(), self.search_applied.clone(), self.date_filter.then_some((self.date_start, self.date_end)));
         if self.loaded_for.as_ref() == Some(&key) {
@@ -128,7 +130,6 @@ impl ClipsPanel {
         }
         self.loaded_for = Some(key);
         self.reload(ctx, client, &cam);
-        let _ = settings;
     }
 
     fn reload(&mut self, ctx: &egui::Context, client: &BiClient, camera: &str) {
@@ -143,11 +144,30 @@ impl ClipsPanel {
         self.db_view = view.to_string();
         settings.set("ui3_current_dbView", view.to_string());
         self.loaded_for = None;
-        self.ensure_loaded(ctx, client, settings, home_group);
+        self.ensure_loaded(ctx, client, home_group);
     }
 
-    pub fn release(&mut self, _gpu: &Gpu) {
+    pub fn release(&mut self) {
         self.thumbs.clear();
+    }
+
+    /// The clip last clicked or selected from the keyboard, if it is still in the list.
+    pub fn focused(&self) -> Option<&ClipItem> {
+        let path = self.focus.as_deref()?;
+        self.clips.iter().find(|c| c.path == path)
+    }
+
+    /// A memo or delete-confirmation dialog is open.
+    pub fn modal_open(&self) -> bool {
+        self.memo_edit.is_some() || self.delete_confirm.is_some()
+    }
+
+    /// Paths from the shift-click anchor to the clip at `to` (inclusive, capped at the selection limit). `None`
+    /// when there is no anchor or it is no longer in the list.
+    fn range_from_anchor(&self, to: usize) -> Option<HashSet<String>> {
+        let a = self.index_of(self.anchor.as_deref()?)?;
+        let (lo, hi) = (a.min(to), a.max(to).min(self.clips.len().checked_sub(1)?));
+        Some(self.clips.get(lo..=hi)?.iter().take(SELECT_LIMIT).map(|c| c.path.clone()).collect())
     }
 
     fn rebuild_rows(&mut self) {
@@ -193,7 +213,7 @@ impl ClipsPanel {
             if query != self.search_applied {
                 self.search_applied = query;
                 self.loaded_for = None;
-                self.ensure_loaded(ctx, client, svc.settings, home_group);
+                self.ensure_loaded(ctx, client, home_group);
             }
         }
         // Periodic refresh to pick up new alerts (UI3 refreshes the list as clips arrive).
@@ -218,7 +238,7 @@ impl ClipsPanel {
             let Some(key) = self.thumb_queue.pop_front() else { break };
             let c = client.clone();
             let path = bi_proto::urls::thumbnail(&format!("@{key}"));
-            self.thumb_jobs.push((key, runtime::spawn(ctx, async move { fetch_color_image(&c, &path, None).await })));
+            self.thumb_jobs.push((key, runtime::spawn(ctx, async move { fetch_color_image(&c, &path).await })));
         }
         // Thumbnail cache bound.
         if self.thumbs.len() > 1500 {
@@ -297,16 +317,19 @@ impl ClipsPanel {
         }
     }
 
-    pub fn delete(&mut self, ctx: &egui::Context, client: &BiClient, items: Vec<ClipItem>) {
+    /// Deletes on the server and drops the items from the local list. Callers use [`delete_items`], which also
+    /// closes the clip if it is the one playing.
+    fn delete(&mut self, ctx: &egui::Context, client: &BiClient, items: Vec<ClipItem>) {
         let c = client.clone();
         let n = items.len();
+        let gone: HashSet<String> = items.iter().map(|i| i.path.clone()).collect();
         self.action_jobs.push(runtime::spawn(ctx, async move {
             for it in &items {
                 c.delete_clip(&it.path, !it.is_clip()).await?;
             }
             Ok(format!("Deleted {n} item{}", if n == 1 { "" } else { "s" }))
         }));
-        let gone: HashSet<String> = self.selected.drain().collect();
+        self.selected.retain(|p| !gone.contains(p));
         self.clips.retain(|c| !gone.contains(&c.path));
         self.rebuild_rows();
     }
@@ -327,19 +350,29 @@ impl ClipsPanel {
     pub fn select_only(&mut self, path: &str) {
         self.selected.clear();
         self.selected.insert(path.to_string());
-        self.focus = self.index_of(path);
-        if let Some(i) = self.focus {
+        self.focus = Some(path.to_string());
+        if let Some(i) = self.index_of(path) {
             self.scroll_to = self.rows.iter().position(|r| matches!(r, Row::Clip(j) if *j == i));
         }
     }
 }
 
-pub async fn fetch_color_image(c: &BiClient, path: &str, max_h: Option<u32>) -> Result<egui::ColorImage> {
+/// Deletes clips/alerts. If the clip open in the video area is among them, playback closes and live video returns.
+pub fn delete_items(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, items: Vec<ClipItem>) {
+    let open_deleted = view.playback.clip.as_ref().is_some_and(|c| items.iter().any(|i| i.path == c.path));
+    view.clips.delete(ctx, &view.client, items);
+    if open_deleted {
+        view.playback.close();
+        let home = view.home_group.clone();
+        view.load_live(ctx, svc.settings, Some(svc.audio), &home);
+    }
+}
+
+pub async fn fetch_color_image(c: &BiClient, path: &str) -> Result<egui::ColorImage> {
     let r = c.get_bytes(path).await?;
     anyhow::ensure!(r.status < 400 && r.is_jpeg(), "HTTP {}", r.status);
     let body = r.body;
     let img = tokio::task::spawn_blocking(move || decode_jpeg_rgba(&body)).await??;
-    let _ = max_h;
     Ok(egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.rgba))
 }
 
@@ -453,7 +486,7 @@ pub fn show_list(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
         view.clips.camera_filter = shown.clone();
         view.clips.followed_camera = shown;
     }
-    view.clips.ensure_loaded(&ctx, &view.client, svc.settings, &home);
+    view.clips.ensure_loaded(&ctx, &view.client, &home);
     view.clips.poll(&ctx, &view.client, svc, &home);
     let h24 = svc.settings.bool("ui3_time24hour");
     let th = style::t();
@@ -523,7 +556,7 @@ pub fn show_list(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
             if view.clips.date_end < view.clips.date_start {
                 view.clips.date_end = view.clips.date_start;
             }
-            view.clips.ensure_loaded(&ctx, &view.client, svc.settings, &home);
+            view.clips.ensure_loaded(&ctx, &view.client, &home);
         }
         ui.add_space(4.0);
         // dbView dropdown
@@ -750,19 +783,18 @@ pub fn show_list(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
                                     view.clips.selected.insert(c.path.clone());
                                 }
                             }
-                            view.clips.anchor = Some(i);
+                            view.clips.anchor = Some(c.path.clone());
                         } else if m.shift
-                            && let Some(a) = view.clips.anchor
+                            && let Some(range) = view.clips.range_from_anchor(i)
                         {
-                            let (lo, hi) = (a.min(i), a.max(i));
-                            view.clips.selected = view.clips.clips[lo..=hi].iter().take(SELECT_LIMIT).map(|c| c.path.clone()).collect();
+                            view.clips.selected = range;
                         } else {
                             view.clips.selected.clear();
                             view.clips.selected.insert(c.path.clone());
-                            view.clips.anchor = Some(i);
+                            view.clips.anchor = Some(c.path.clone());
                             open = Some(c.clone());
                         }
-                        view.clips.focus = Some(i);
+                        view.clips.focus = Some(c.path.clone());
                     }
                     resp.context_menu(|ui| {
                         if !view.clips.selected.contains(&c.path) {
@@ -838,7 +870,7 @@ fn update_preview(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, 
         let ctx2 = ctx.clone();
         let key = format!("preview-{rec_id}-{}", p.frame);
         p.job = Some(runtime::spawn(ctx, async move {
-            let img = fetch_color_image(&c2, &path, Some(240)).await?;
+            let img = fetch_color_image(&c2, &path).await?;
             Ok(ctx2.load_texture(key, img, egui::TextureOptions::LINEAR))
         }));
     }
@@ -899,9 +931,10 @@ fn clip_context_menu(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services,
             ui.close();
         }
     }
-    if n == 1 && item(ui, icons::COPY, "Copy clip URL").clicked() {
+    // A link that opens this recording in the UI3 web interface (there is no native URL scheme).
+    if n == 1 && item(ui, icons::COPY, "Copy UI3 Web Link").clicked() {
         ctx.copy_text(format!("{}ui3.htm?rec={}", view.client.base_url(), c.rec_id()));
-        svc.toasts.info("URL copied to the clipboard");
+        svc.toasts.info("UI3 web link copied to the clipboard");
         ui.close();
     }
     if n == 1 && item(ui, icons::EDIT, "Edit Memo").clicked() {
@@ -910,7 +943,7 @@ fn clip_context_menu(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services,
     }
     w::list_separator(ui);
     if item(ui, icons::DOWNLOAD, &format!("Download{plural}")).clicked() {
-        crate::views::dialogs::download_clips(view, svc, items.clone());
+        crate::views::dialogs::download_clips(view, &ctx, svc, items.clone());
         ui.close();
     }
     if n == 1 && item(ui, icons::LAUNCH, "Export").clicked() {
@@ -933,7 +966,7 @@ fn clip_context_menu(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services,
             if svc.settings.delete_needs_confirm(items.len()) {
                 view.clips.delete_confirm = Some(items);
             } else {
-                view.clips.delete(&ctx, &view.client, items);
+                delete_items(view, &ctx, svc, items);
             }
             ui.close();
         }
@@ -980,14 +1013,39 @@ pub fn memo_and_delete_dialogs(view: &mut MainView, ctx: &egui::Context, svc: &m
     if let Some(yes) = confirm {
         let items = view.clips.delete_confirm.take().unwrap();
         if yes {
-            // Deleting the clip that is open in the video area returns to live video.
-            let open_deleted = view.playback.clip.as_ref().is_some_and(|c| items.iter().any(|i| i.path == c.path));
-            view.clips.delete(ctx, &view.client, items);
-            if open_deleted {
-                view.playback.close();
-                let home = view.home_group.clone();
-                view.load_live(ctx, svc.settings, Some(svc.audio), &home);
-            }
+            delete_items(view, ctx, svc, items);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(path: &str) -> ClipItem {
+        ClipItem { path: path.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn shift_range_survives_a_list_reload() {
+        let mut p = ClipsPanel::new(&Settings::default());
+        p.clips = (0..10).map(|i| clip(&format!("@{i}.bvr"))).collect();
+        p.anchor = Some("@8.bvr".into());
+        assert_eq!(p.range_from_anchor(5).unwrap().len(), 4);
+        // The list reloads shorter (filter change): the anchor is gone, so there is no range, and no panic.
+        p.clips.truncate(3);
+        assert!(p.range_from_anchor(1).is_none());
+        // The anchor is found by path even after newer clips shift everything down.
+        p.anchor = Some("@1.bvr".into());
+        p.clips.insert(0, clip("@new.bvr"));
+        let r = p.range_from_anchor(3).unwrap();
+        assert!(r.contains("@1.bvr") && r.contains("@2.bvr") && !r.contains("@0.bvr") && !r.contains("@new.bvr"));
+        // An index past the end is clamped rather than sliced out of range.
+        assert_eq!(p.range_from_anchor(99).unwrap().len(), 2);
+        // Focus is by path too.
+        p.select_only("@2.bvr");
+        assert_eq!(p.focused().map(|c| c.path.as_str()), Some("@2.bvr"));
+        p.clips.clear();
+        assert!(p.focused().is_none() && p.range_from_anchor(0).is_none());
     }
 }

@@ -3,7 +3,6 @@
 
 use crate::app::Services;
 use crate::icons;
-use crate::runtime;
 use crate::views::main_view::{MainView, Tab};
 use crate::views::style::t;
 use crate::views::w;
@@ -88,10 +87,7 @@ fn live_boxes(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
             });
             if let Some(s) = chosen {
                 let c = view.client.clone();
-                runtime::spawn_detached(async move {
-                    let _ = c.set_schedule(&s).await;
-                });
-                view.force_status_refresh();
+                crate::views::dialogs::run_action(view, &ctx, "Schedule changed", async move { c.set_schedule(&s).await.map(|_| ()) });
             }
         });
     }
@@ -200,19 +196,14 @@ fn profile_box(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services, st: &
     if hint {
         svc.toasts.info("Long press to disable automatic scheduling.");
     }
+    let ctx = ui.ctx().clone();
     if let Some(i) = chosen {
         let c = view.client.clone();
-        runtime::spawn_detached(async move {
-            let _ = c.set_profile(i, None).await;
-        });
-        view.force_status_refresh();
+        crate::views::dialogs::run_action(view, &ctx, "Profile changed", async move { c.set_profile(i, None).await.map(|_| ()) });
     }
     if lock_click {
         let c = view.client.clone();
-        runtime::spawn_detached(async move {
-            let _ = c.set_profile(-1, None).await;
-        });
-        view.force_status_refresh();
+        crate::views::dialogs::run_action(view, &ctx, "Schedule override changed", async move { c.set_profile(-1, None).await.map(|_| ()) });
     }
 }
 
@@ -254,7 +245,7 @@ pub fn current_group_dropdown(view: &mut MainView, ui: &mut egui::Ui, svc: &mut 
             Tab::Clips => {
                 view.clips.camera_filter = if view.camera(&id).is_some_and(|c| c.is_group()) && id.eq_ignore_ascii_case(&view.home_group) { String::new() } else { id.clone() };
                 let home = view.home_group.clone();
-                view.clips.ensure_loaded(ctx, &view.client, svc.settings, &home);
+                view.clips.ensure_loaded(ctx, &view.client, &home);
             }
             Tab::Live => view.load_live(ctx, svc.settings, Some(svc.audio), &id),
         }
@@ -344,10 +335,8 @@ fn status_area(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services, rect:
             // UI3 only toggles red <-> yellow (ui3.js:6046).
             let next = if sig == 0 { 2 } else { 0 };
             let c = view.client.clone();
-            runtime::spawn_detached(async move {
-                let _ = c.set_signal(next).await;
-            });
-            view.force_status_refresh();
+            let ctx = ui.ctx().clone();
+            crate::views::dialogs::run_action(view, &ctx, "Traffic signal changed", async move { c.set_signal(next).await.map(|_| ()) });
         }
     }
     ui.add_space(30.0);

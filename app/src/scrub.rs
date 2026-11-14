@@ -3,13 +3,13 @@
 //! Port of the seek-bar `loadSeekHintImg` / `queuedMsec` logic (ui3.js `SeekBar`, 12449) and the timeline's
 //! `downloadSeekPreview` + `timelineSync` single lock (ui3.js:10456, 11130): exactly one JPEG request is in flight;
 //! while it loads only the newest requested position is remembered, intermediate positions are skipped.
-//! Native improvement: decoded frames are kept in an LRU cache so re-scrubbing a region is instant.
+//! Native improvement: decoded frames are kept in an LRU cache (bounded by a memory budget) so re-scrubbing a
+//! region is instant.
 
 use crate::runtime::{self, Pending};
 use anyhow::Result;
 use bi_media::jpeg::{RgbaImage, decode_jpeg_rgba};
 use bi_proto::BiClient;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -36,16 +36,36 @@ pub struct ScrubLoader {
     inflight: Option<(ScrubRequest, Job, Instant)>,
     queued: Option<ScrubRequest>,
     cache: lru::LruCache<String, (Arc<RgbaImage>, Option<i64>)>,
+    /// Bytes of decoded pixels currently cached, and the most that may be.
+    cache_bytes: usize,
+    budget_bytes: usize,
     pub last_error: Option<String>,
 }
 
 impl ScrubLoader {
-    pub fn new(cache_frames: usize) -> Self {
-        ScrubLoader { inflight: None, queued: None, cache: lru::LruCache::new(NonZeroUsize::new(cache_frames.max(1)).unwrap()), last_error: None }
+    /// `budget_mb`: memory the cache of decoded frames may use. A 4K frame is about 33 MiB, so the cache is
+    /// bounded by size rather than by frame count.
+    pub fn new(budget_mb: usize) -> Self {
+        ScrubLoader { inflight: None, queued: None, cache: lru::LruCache::unbounded(), cache_bytes: 0, budget_bytes: budget_mb.max(1) * 1024 * 1024, last_error: None }
     }
 
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+        self.cache_bytes = 0;
+    }
+
+    /// Caches a frame, evicting the least recently used ones while over budget (the newest frame always stays).
+    fn cache_put(&mut self, key: String, img: Arc<RgbaImage>, utc: Option<i64>) {
+        self.cache_bytes += img.rgba.len();
+        if let Some((old, _)) = self.cache.put(key, (img, utc)) {
+            self.cache_bytes -= old.rgba.len();
+        }
+        while self.cache_bytes > self.budget_bytes && self.cache.len() > 1 {
+            match self.cache.pop_lru() {
+                Some((_, (old, _))) => self.cache_bytes -= old.rgba.len(),
+                None => break,
+            }
+        }
     }
 
     /// Requests a frame. Returns it immediately if cached.
@@ -90,7 +110,7 @@ impl ScrubLoader {
         let out = match res {
             Ok((img, utc)) => {
                 self.last_error = None;
-                self.cache.put(req.path.clone(), (img.clone(), utc));
+                self.cache_put(req.path.clone(), img.clone(), utc);
                 Some(ScrubFrame { tag: req.tag, image: img, utc, latency_ms })
             }
             Err(e) => {
@@ -110,5 +130,37 @@ impl ScrubLoader {
     /// Drops any queued request (e.g. on mouse release).
     pub fn cancel_queued(&mut self) {
         self.queued = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(bytes: usize) -> Arc<RgbaImage> {
+        Arc::new(RgbaImage { width: 1, height: 1, rgba: vec![0; bytes] })
+    }
+
+    #[test]
+    fn cache_is_bounded_by_bytes() {
+        let mut l = ScrubLoader::new(1); // 1 MiB
+        let third = 400 * 1024;
+        l.cache_put("a".into(), frame(third), None);
+        l.cache_put("b".into(), frame(third), None);
+        assert_eq!(l.cache.len(), 2);
+        // Touch "a" so "b" is the least recently used, then go over budget.
+        assert!(l.cache.get("a").is_some());
+        l.cache_put("c".into(), frame(third), None);
+        assert!(l.cache.contains("a") && l.cache.contains("c") && !l.cache.contains("b"));
+        assert_eq!(l.cache_bytes, 2 * third);
+        // Replacing a key does not count its bytes twice.
+        l.cache_put("c".into(), frame(third), None);
+        assert_eq!(l.cache_bytes, 2 * third);
+        // A single frame larger than the whole budget is still kept (it is the one on screen).
+        l.cache_put("huge".into(), frame(4 * 1024 * 1024), None);
+        assert_eq!(l.cache.len(), 1);
+        assert_eq!(l.cache_bytes, 4 * 1024 * 1024);
+        l.clear_cache();
+        assert_eq!((l.cache.len(), l.cache_bytes), (0, 0));
     }
 }

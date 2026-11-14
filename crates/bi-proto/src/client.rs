@@ -6,7 +6,7 @@ use md5::{Digest, Md5};
 use parking_lot::RwLock;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Default)]
@@ -140,9 +140,10 @@ impl BiClient {
             .body(serde_json::to_string(args)?)
             .send()
             .await
-            .with_context(|| format!("POST {url}"))?;
+            .map_err(without_url)
+            .with_context(|| format!("POST json ({cmd})"))?;
         let status = resp.status();
-        let text = resp.text().await?;
+        let text = resp.text().await.map_err(without_url)?;
         if !status.is_success() {
             bail!("HTTP {status} from /json ({cmd}): {}", truncate(&text, 200));
         }
@@ -223,13 +224,14 @@ impl BiClient {
     /// GET returning bytes plus selected headers (used for JPEG frames, thumbnails, /time/set).
     pub async fn get_bytes(&self, path: &str) -> Result<HttpBytes> {
         let url = self.url(path);
-        let resp = self.inner.http.get(&url).send().await.with_context(|| format!("GET {url}"))?;
+        // Errors name the session-less `path`: the full URL carries the session id.
+        let resp = self.inner.http.get(&url).send().await.map_err(without_url).with_context(|| format!("GET {path}"))?;
         let status = resp.status();
         if status.as_u16() == 403 {
             *self.inner.session.write() = None;
         }
         let headers = resp.headers().clone();
-        let body = resp.bytes().await?;
+        let body = resp.bytes().await.map_err(without_url).with_context(|| format!("GET {path}"))?;
         Ok(HttpBytes { status: status.as_u16(), headers, body })
     }
 
@@ -238,12 +240,55 @@ impl BiClient {
         // The request path without the session argument, so stream parameters can be inspected in the log.
         tracing::info!("open stream: {path}");
         let url = self.url(path);
-        let resp = self.inner.stream_http.get(&url).send().await.with_context(|| format!("GET {url}"))?;
+        // `stream_http` has no total timeout, so bound the wait for the response headers here.
+        let resp = match tokio::time::timeout(HEADER_TIMEOUT, self.inner.stream_http.get(&url).send()).await {
+            Ok(r) => r.map_err(without_url).with_context(|| format!("GET {path}"))?,
+            Err(_) => bail!("GET {path}: timed out waiting for the server to respond"),
+        };
         if resp.status().as_u16() == 403 {
             *self.inner.session.write() = None;
         }
         Ok(resp)
     }
+}
+
+/// How long [`BiClient::open_stream`] waits for response headers.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(20);
+/// Longest gap between chunks of a download before it is abandoned.
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Drops the request URL (which carries `session=`) from a reqwest error before it is logged or shown.
+pub fn without_url(e: reqwest::Error) -> anyhow::Error {
+    anyhow::Error::new(e.without_url())
+}
+
+/// Streams a response body to `dest` without buffering it in memory. `received` counts bytes written so far.
+/// A failed or stalled download removes the partial file.
+pub async fn save_body(resp: reqwest::Response, dest: &std::path::Path, received: &AtomicU64) -> Result<u64> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let r: Result<u64> = async {
+        let mut file = tokio::fs::File::create(dest).await.with_context(|| format!("creating {}", dest.display()))?;
+        let mut body = resp.bytes_stream();
+        let mut total = 0u64;
+        loop {
+            let chunk = match tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, body.next()).await {
+                Err(_) => bail!("download stalled"),
+                Ok(None) => break,
+                Ok(Some(c)) => c.map_err(without_url)?,
+            };
+            file.write_all(&chunk).await?;
+            total += chunk.len() as u64;
+            received.store(total, Ordering::Relaxed);
+        }
+        file.flush().await?;
+        Ok(total)
+    }
+    .await;
+    if r.is_err() {
+        let _ = tokio::fs::remove_file(dest).await;
+    }
+    r
 }
 
 pub struct HttpBytes {
@@ -288,6 +333,19 @@ mod tests {
     fn md5_hash() {
         assert_eq!(login_response_hash("admin", "ABC", "pass"), "8e4b3dc21a937804eeca74d807d7174b");
         assert_eq!(login_response_hash("Anonymous", "XYZ", ""), "2471bc1f6bc9f87744cfb39da96af584");
+    }
+
+    #[test]
+    fn request_errors_do_not_carry_the_session() {
+        // Nothing listens on port 9 of the loopback address, so the request fails to connect.
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let client = BiClient::new("http://127.0.0.1:9", Credentials::default()).unwrap();
+        *client.inner.session.write() = Some(Session { id: "SECRETSESSION".into(), login: Default::default() });
+        let e = rt.block_on(client.get_bytes("image/cam1?q=1")).err().expect("connection should fail");
+        let text = format!("{e:#}");
+        assert!(!text.contains("SECRETSESSION"), "{text}");
+        assert!(text.contains("image/cam1"), "{text}");
+        assert!(is_unreachable(&e));
     }
 
     #[test]

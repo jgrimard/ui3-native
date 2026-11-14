@@ -1,4 +1,4 @@
-//! Zero-copy video path (Phase B).
+//! Zero-copy video path.
 //!
 //! One D3D11 device is created on the *same adapter* as the renderer (matched by LUID) and handed to FFmpeg as the
 //! D3D11VA hardware device for every decoder. Decoded surfaces (slices of FFmpeg's texture array) are copied

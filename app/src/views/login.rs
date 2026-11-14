@@ -26,7 +26,7 @@ pub struct LoginView {
     tried_auto: bool,
     /// The login in progress was started automatically (not by the user pressing Log In).
     was_automatic: bool,
-    /// Logged in from UI3N_* environment variables (testing): do not save the server entry.
+    /// Logged in from UI3N_* environment variables (debug builds, testing): do not save the server entry.
     from_env: bool,
 }
 
@@ -46,7 +46,8 @@ impl LoginView {
             was_automatic: false,
             from_env: false,
         };
-        // Development/testing: UI3N_URL / UI3N_USER / UI3N_PASS log in automatically.
+        // Development/testing (debug builds only): UI3N_URL / UI3N_USER / UI3N_PASS log in automatically.
+        #[cfg(debug_assertions)]
         if let Ok(url) = std::env::var("UI3N_URL") {
             v.url = url;
             v.user = std::env::var("UI3N_USER").unwrap_or_default();
@@ -59,14 +60,17 @@ impl LoginView {
         }
         if let Some(i) = settings.last_server.filter(|i| *i < settings.servers.len()) {
             v.select(settings, i);
-        } else if settings.servers.is_empty() {
-            // First run: offer the project-local test config if present (development convenience).
-            if let Some(cfg) = dev_server_config() {
-                v.url = cfg.0;
-                v.user = cfg.1;
-                v.pass = cfg.2;
-                v.name = "Blue Iris".into();
-            }
+        }
+        // First run of a debug build: offer the project-local test config if present.
+        #[cfg(debug_assertions)]
+        if v.server_idx.is_none()
+            && settings.servers.is_empty()
+            && let Some(cfg) = dev_server_config()
+        {
+            v.url = cfg.0;
+            v.user = cfg.1;
+            v.pass = cfg.2;
+            v.name = "Blue Iris".into();
         }
         v
     }
@@ -303,7 +307,8 @@ fn radial_background(p: &egui::Painter, r: Rect) {
     p.add(egui::Shape::mesh(m));
 }
 
-/// `temp/bi-server.json` next to the workspace (development only; never shipped).
+/// `temp/bi-server.json` next to the workspace (debug builds only; not compiled into releases).
+#[cfg(debug_assertions)]
 fn dev_server_config() -> Option<(String, String, String)> {
     let mut dir = std::env::current_exe().ok()?;
     for _ in 0..5 {

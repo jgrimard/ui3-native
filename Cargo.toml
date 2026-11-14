@@ -25,7 +25,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
-eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "persistence"] }
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "persistence", "links"] }
 egui = "0.36"
 egui-wgpu = "0.36"
 egui_extras = { version = "0.36", features = ["image", "datepicker", "serde", "svg"] }
@@ -40,7 +40,10 @@ lru = "0.18"
 directories = "6"
 rfd = "0.17"
 gilrs = "0.11"
-rumqttc = { version = "0.25", default-features = false, features = ["websocket", "url"] }
+# TLS for MQTT (mqtts:// and wss://). rumqttc only supports WebSocket-over-TLS through rustls.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "0.8"
+rumqttc = { version = "0.25", default-features = false, features = ["websocket", "url", "use-rustls-no-provider"] }
 
 [profile.dev.package."*"]
 opt-level = 2

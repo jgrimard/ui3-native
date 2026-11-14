@@ -102,8 +102,11 @@ impl PtzState {
     }
 }
 
-/// UI3 retries a failed hold start/stop every 100 ms until it succeeds (`PTZ_unsafe_async_guarantee`).
+/// UI3 retries a failed hold start/stop every 100 ms until it succeeds (`PTZ_unsafe_async_guarantee`). Here the
+/// first few retries are that quick, then they back off so an unreachable camera is not hammered.
 const RETRY_DELAY: Duration = Duration::from_millis(100);
+const RETRY_DELAY_SLOW: Duration = Duration::from_secs(1);
+const QUICK_RETRIES: u32 = 10;
 
 type PresetKey = (String, i32);
 
@@ -122,6 +125,8 @@ pub struct PtzPanel {
     motor: Option<(String, i32)>,
     /// Failed hold request to resend: `(when, camera, button, start)`.
     retry: Option<(Instant, String, i32, bool)>,
+    /// Consecutive failed hold requests (drives the retry back-off and keeps the log quiet).
+    retries: u32,
     /// The current video is live from a PTZ camera the user may control.
     available: bool,
     preset_thumbs: HashMap<PresetKey, Option<egui::TextureHandle>>,
@@ -172,6 +177,16 @@ impl PtzPanel {
 
     pub fn hotkey_up(&mut self, key: egui::Key) {
         self.hotkeys.retain(|(k, _)| *k != key);
+    }
+
+    /// Drops held PTZ hotkeys (the keyboard went to a text field, so their release would be missed).
+    pub fn release_hotkeys(&mut self) {
+        self.hotkeys.clear();
+    }
+
+    /// The "set preset" dialog is open.
+    pub fn editing_preset(&self) -> bool {
+        self.preset_edit.is_some()
     }
 
     /// Drops every held input (window lost focus / minimized); the motor is stopped on the next `poll`.
@@ -274,10 +289,21 @@ impl PtzPanel {
             self.inflight = None;
             match (r, &a) {
                 (Err(e), PtzAction::Hold { button, start }) => {
-                    // Starts and stops are retried until they succeed so a motor is never left running.
-                    tracing::warn!("PTZ hold {} failed ({e:#}); retrying", if *start { "start" } else { "stop" });
-                    self.retry = Some((Instant::now() + RETRY_DELAY, cam, *button, *start));
+                    // A stop is retried until it succeeds so a motor is never left running. A start is only
+                    // retried while its input is still held; otherwise `reconcile` just sends the stop.
+                    let wanted = !*start || (self.available && self.merged().command() == Some(*button));
+                    if wanted {
+                        if self.retries == 0 {
+                            tracing::warn!("PTZ hold {} failed ({e:#}); retrying", if *start { "start" } else { "stop" });
+                        }
+                        self.retries += 1;
+                        let delay = if self.retries > QUICK_RETRIES { RETRY_DELAY_SLOW } else { RETRY_DELAY };
+                        self.retry = Some((Instant::now() + delay, cam, *button, *start));
+                    } else {
+                        tracing::warn!("PTZ hold start failed ({e:#})");
+                    }
                 }
+                (Ok(()), PtzAction::Hold { .. }) => self.retries = 0,
                 (Err(e), _) => svc.toasts.error(format!("PTZ command failed. {e:#}")),
                 (Ok(()), PtzAction::SetPreset { preset, .. }) => {
                     svc.toasts.success(format!("Preset {preset} set successfully."));
@@ -313,7 +339,7 @@ impl PtzPanel {
             Some(Err(_)) => false,
             None => true,
         });
-        self.poll_gamepad(svc);
+        self.poll_gamepad(ctx, svc);
     }
 
     fn preset_thumb(&mut self, ctx: &egui::Context, client: &BiClient, preset: i32) -> Option<egui::TextureHandle> {
@@ -324,13 +350,18 @@ impl PtzPanel {
         self.preset_thumbs.insert(k.clone(), None);
         let c = client.clone();
         let path = bi_proto::urls::ptz_preset_image(&self.camera, preset);
-        self.thumb_jobs.push((k, runtime::spawn(ctx, async move { crate::views::clips::fetch_color_image(&c, &path, None).await })));
+        self.thumb_jobs.push((k, runtime::spawn(ctx, async move { crate::views::clips::fetch_color_image(&c, &path).await })));
         None
     }
 
     /// Gamepad PTZ (ui3_gamepad_ptz_enabled): left stick pans/tilts, right stick Y zooms (press-and-hold semantics).
-    fn poll_gamepad(&mut self, svc: &mut Services) {
+    fn poll_gamepad(&mut self, ctx: &egui::Context, svc: &mut Services) {
         if !svc.settings.bool("ui3_gamepad_ptz_enabled") || self.camera.is_empty() {
+            return;
+        }
+        // Like the browser Gamepad API UI3 used, the gamepad only drives PTZ while the window has focus.
+        if ctx.input(|i| i.viewport().focused == Some(false) || i.viewport().minimized == Some(true)) {
+            self.gamepad_state = PtzState::default();
             return;
         }
         if !self.gamepad_init {

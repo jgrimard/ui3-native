@@ -15,7 +15,7 @@ use bi_proto::api::{TimelineData, bi_color_to_rgb, flags};
 use bi_proto::profile;
 use bi_proto::urls::{self, AudioRequest};
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, pos2, vec2};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 const KEEP_OUT_MS: i64 = 15_000;
@@ -95,6 +95,8 @@ pub struct TimelinePanel {
     pub is_live: bool,
     seek: ScrubLoader,
     thumbs: HashMap<String, Option<egui::TextureHandle>>,
+    /// Alert thumbnails waiting to be downloaded (a few at a time, see `THUMB_JOBS`).
+    thumb_queue: VecDeque<String>,
     thumb_jobs: Vec<(String, Pending<Result<egui::ColorImage>>)>,
     pub server_offset_ms: i64,
     hover_x: Option<f32>,
@@ -125,8 +127,9 @@ impl TimelinePanel {
             paused: false,
             did_pause: false,
             is_live: true,
-            seek: ScrubLoader::new(settings.native.scrub_cache_frames),
+            seek: ScrubLoader::new(settings.native.scrub_cache_mb),
             thumbs: HashMap::new(),
+            thumb_queue: VecDeque::new(),
             thumb_jobs: Vec::new(),
             server_offset_ms: 0,
             hover_x: None,
@@ -293,6 +296,7 @@ impl TimelinePanel {
         self.loaded = None;
         self.data = None;
         self.thumbs.clear();
+        self.thumb_queue.clear();
         self.user_did_set_time(ctx, client, player, svc);
     }
 
@@ -438,17 +442,42 @@ impl TimelinePanel {
         self.open_at(ctx, client, player, svc, t, play, dir);
     }
 
-    fn thumb(&mut self, ctx: &egui::Context, client: &BiClient, rec_id: &str) -> Option<egui::TextureHandle> {
+    /// The alert's thumbnail if loaded; otherwise queues it for download (`start_thumb_jobs`).
+    fn thumb(&mut self, rec_id: &str) -> Option<egui::TextureHandle> {
         if let Some(t) = self.thumbs.get(rec_id) {
             return t.clone();
         }
+        // Bound the texture cache: panning through weeks of alerts would otherwise keep every thumbnail.
+        if self.thumbs.len() >= MAX_THUMBS {
+            self.thumbs.clear();
+            self.thumb_queue.clear();
+        }
         self.thumbs.insert(rec_id.to_string(), None);
-        let c = client.clone();
-        let path = urls::thumbnail(&format!("@{rec_id}"));
-        self.thumb_jobs.push((rec_id.to_string(), runtime::spawn(ctx, async move { crate::views::clips::fetch_color_image(&c, &path, None).await })));
+        self.thumb_queue.push_back(rec_id.to_string());
+        // Thumbnails scrolled past before their turn are dropped (and asked for again if they come back).
+        if self.thumb_queue.len() > MAX_QUEUED_THUMBS
+            && let Some(old) = self.thumb_queue.pop_front()
+        {
+            self.thumbs.remove(&old);
+        }
         None
     }
+
+    fn start_thumb_jobs(&mut self, ctx: &egui::Context, client: &BiClient) {
+        while self.thumb_jobs.len() < THUMB_JOBS {
+            // Newest request first: it is the one on screen.
+            let Some(rec_id) = self.thumb_queue.pop_back() else { break };
+            let c = client.clone();
+            let path = urls::thumbnail(&format!("@{rec_id}"));
+            self.thumb_jobs.push((rec_id, runtime::spawn(ctx, async move { crate::views::clips::fetch_color_image(&c, &path).await })));
+        }
+    }
 }
+
+/// Concurrent alert-thumbnail downloads.
+const THUMB_JOBS: usize = 4;
+const MAX_QUEUED_THUMBS: usize = 64;
+const MAX_THUMBS: usize = 400;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -537,6 +566,11 @@ pub fn show_panel(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
         Some(Err(_)) => false,
         None => true,
     });
+    view.timeline.start_thumb_jobs(&ctx, &view.client);
+    // An expired session ends the stream: log in again, then `MainView::poll_background` reopens it.
+    if matches!(view.content, Content::Timeline { .. }) && !view.timeline.paused && view.player.ended() == Some(bi_proto::stream::EndReason::SessionLost) {
+        view.recover_session(&ctx);
+    }
     // Follow the playing video's frame time (FrameRendered) and go live at the keep-out zone.
     if !view.timeline.dragging && !view.timeline.paused && !view.timeline.is_live && matches!(view.content, Content::Timeline { .. }) {
         let m = view.player.meta();
@@ -851,7 +885,6 @@ fn draw(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
         if show_thumbs {
             let y = canvas.top() + alert_space + 4.0;
             let h = canvas.height() - alert_space - 8.0;
-            let client = view.client.clone();
             // Visible thumbnails as (rect, texture); the last one under the pointer is the "hovered" alert.
             let mut thumbs: Vec<(Rect, egui::TextureHandle)> = Vec::new();
             for a in &d.alerts {
@@ -860,7 +893,7 @@ fn draw(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services) {
                 if x > canvas.right() || x < canvas.left() - h * 2.0 {
                     continue;
                 }
-                if let Some(t) = tl.thumb(&ctx, &client, id) {
+                if let Some(t) = tl.thumb(id) {
                     let s = t.size_vec2();
                     let w = h * s.x / s.y.max(1.0);
                     thumbs.push((Rect::from_min_size(pos2(x, y), vec2(w, h)), t));

@@ -42,6 +42,12 @@ pub struct LoginData {
     pub system_name: String,
     #[serde(default, deserialize_with = "lenient::string")]
     pub version: String,
+    /// Newest Blue Iris version the server knows of; empty when none. Blue Iris refreshes it about once a day (ui3.js:31849).
+    #[serde(default, deserialize_with = "lenient::string")]
+    pub newversion: String,
+    /// Support and maintenance expiry, e.g. `"1/1/2030 [Priority]"` (ui3.js:32198).
+    #[serde(default, deserialize_with = "lenient::string")]
+    pub support: String,
     #[serde(default, deserialize_with = "lenient::string_vec")]
     pub profiles: Vec<String>,
     #[serde(default, deserialize_with = "lenient::string_vec")]
@@ -118,6 +124,11 @@ impl LoginData {
     /// Blue Iris version as comparable tuple (e.g. "5.9.9.33" -> [5,9,9,33]).
     pub fn version_parts(&self) -> Vec<u32> {
         parse_version(&self.version)
+    }
+    /// The newer version the server reported, if it is actually newer than the installed one.
+    pub fn update_available(&self) -> Option<&str> {
+        let new = parse_version(&self.newversion);
+        (!new.is_empty() && new > self.version_parts()).then_some(self.newversion.as_str())
     }
 }
 
@@ -395,6 +406,7 @@ pub mod flags {
     pub const ALERT_GROUP: i64 = 1 << 22;
     pub const ALERT_CANCELLED: i64 = 1 << 23;
     pub const ALERT_NOSIGNAL: i64 = 1 << 24;
+    /// Same bit as `ALERT_NOSIGNAL`, as in UI3's `BIDBFLAG` table.
     pub const ALERT_HIDDEN: i64 = 1 << 24;
     pub const AI_PERSON: i64 = 1 << 26;
     pub const AI_VEHICLE: i64 = 1 << 27;
@@ -675,5 +687,14 @@ mod tests {
         assert_eq!(l.profiles, ["Inactive", "Away"]);
         assert_eq!(l.schedules, ["Default"]);
         assert_eq!(l.tz_offset_ms(), -300 * 60000);
+    }
+
+    #[test]
+    fn update_available_only_when_newer() {
+        let login = |cur: &str, new: &str| LoginData { version: cur.into(), newversion: new.into(), ..Default::default() };
+        assert_eq!(login("6.0.9.18", "6.0.10.2").update_available(), Some("6.0.10.2"));
+        assert_eq!(login("6.0.9.18", "6.0.9.18").update_available(), None);
+        assert_eq!(login("6.0.10.2", "6.0.9.18").update_available(), None);
+        assert_eq!(login("6.0.9.18", "").update_available(), None);
     }
 }

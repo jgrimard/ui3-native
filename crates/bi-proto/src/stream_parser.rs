@@ -447,7 +447,8 @@ pub fn nal_types(data: &[u8], h265: bool) -> impl Iterator<Item = u8> + '_ {
                 zeros += 1;
                 continue;
             }
-            let start = (zeros == 2 || zeros == 3) && b == 1 && i < data.len();
+            // Any run of two or more zero bytes before the 1 is a start code (encoders may pad with extra zeros).
+            let start = zeros >= 2 && b == 1 && i < data.len();
             zeros = 0;
             if start {
                 let h = data[i];
@@ -605,5 +606,8 @@ mod tests {
         assert!(!is_keyframe(&[0, 0, 0, 1, 0x41], false));
         assert!(is_keyframe(&[0, 0, 1, 21 << 1, 1], true)); // CRA
         assert!(!is_keyframe(&[0, 0, 1, 1 << 1, 1], true));
+        // Start codes padded with extra zero bytes.
+        assert!(is_keyframe(&[0, 0, 0, 0, 1, 0x65], false));
+        assert_eq!(nal_types(&[0, 0, 0, 0, 0, 1, 0x67, 0, 0, 0, 0, 1, 0x65], false).collect::<Vec<_>>(), vec![7, 5]);
     }
 }

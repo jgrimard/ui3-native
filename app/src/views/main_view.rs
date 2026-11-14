@@ -63,6 +63,10 @@ pub struct MainView {
     pub events: crate::events::Events,
     pub mqtt: Option<crate::mqtt::Mqtt>,
     mqtt_key: String,
+    /// When the MQTT settings last changed; the client restarts once they have been stable for a moment.
+    mqtt_changed_at: Option<Instant>,
+    /// Logging in again after the session expired; the current video reopens when it completes.
+    relogin_job: Option<Pending<Result<Session>>>,
     /// Live streams stopped because the window is minimized (`ui3_pause_when_hidden`).
     paused_hidden: bool,
     keep_awake: bool,
@@ -91,8 +95,8 @@ pub struct MainView {
 
 impl MainView {
     pub fn new(client: BiClient, session: Session, cameras: Vec<CameraInfo>, ctx: &egui::Context, settings: &mut Settings) -> Self {
-        // UI3 titles the page "<system name> UI3" (SysNameToAppName).
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{} UI3", session.login.system_name)));
+        let title = if session.login.system_name.trim().is_empty() { "UI3 Native".to_string() } else { format!("{} - UI3 Native", session.login.system_name) };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         let mut home = settings.str("ui3_defaultCameraGroupId");
         if !cameras.iter().any(|c| c.id.eq_ignore_ascii_case(&home)) {
             home = cameras.iter().find(|c| c.is_group()).or(cameras.first()).map(|c| c.id.clone()).unwrap_or_default();
@@ -115,6 +119,8 @@ impl MainView {
             events: Default::default(),
             mqtt: None,
             mqtt_key: String::new(),
+            mqtt_changed_at: None,
+            relogin_job: None,
             paused_hidden: false,
             keep_awake: false,
             last_input: Instant::now(),
@@ -299,7 +305,34 @@ Retrying every 15 seconds.", e.root_cause());
         }
     }
 
+    /// Logs in again after the server dropped the session; `poll_background` reopens the current video (live,
+    /// clip or timeline) once the login completes. Safe to call repeatedly.
+    pub fn recover_session(&mut self, ctx: &egui::Context) {
+        if self.relogin_job.is_none() {
+            tracing::warn!("Blue Iris session lost; logging in again");
+            let c = self.client.clone();
+            self.relogin_job = Some(runtime::spawn(ctx, async move { c.login().await }));
+        }
+    }
+
     fn poll_background(&mut self, ctx: &egui::Context, svc: &mut Services) {
+        if let Some(j) = &mut self.relogin_job
+            && let Some(r) = j.poll()
+        {
+            self.relogin_job = None;
+            match r {
+                Ok(_) => self.reload_current(ctx, svc),
+                Err(e) => {
+                    svc.toasts.error(format!("Could not log in again: {e:#}"));
+                    // Recorded playback stops; live video keeps retrying on its usual timer.
+                    match self.content {
+                        Content::Clip { .. } => self.playback.paused = true,
+                        Content::Timeline { .. } => self.timeline.paused = true,
+                        _ => self.reconnect_at = Some(Instant::now() + Duration::from_secs(5)),
+                    }
+                }
+            }
+        }
         if let Some(j) = &mut self.camlist_job
             && let Some(r) = j.poll()
         {
@@ -351,21 +384,17 @@ Retrying every 15 seconds.", e.root_cause());
         // Live stream ended unexpectedly: reconnect (UI3 reconnects after a short delay).
         if let Content::Live { id } = &self.content
             && let Some(reason) = self.player.ended()
+            && self.relogin_job.is_none()
         {
             match self.reconnect_at {
+                // An expired session needs a new login before the stream can be reopened.
+                None if matches!(reason, bi_proto::stream::EndReason::SessionLost) => self.recover_session(ctx),
                 None => {
-                    tracing::warn!("live stream ended: {reason:?}; reconnecting");
-                    let delay = if matches!(reason, bi_proto::stream::EndReason::SessionLost) { 500 } else { 2000 };
-                    self.reconnect_at = Some(Instant::now() + Duration::from_millis(delay));
+                    tracing::warn!("live stream ended: {reason}; reconnecting");
+                    self.reconnect_at = Some(Instant::now() + Duration::from_millis(2000));
                 }
                 Some(t) if Instant::now() >= t => {
                     let id = id.clone();
-                    let c = self.client.clone();
-                    if matches!(reason, bi_proto::stream::EndReason::SessionLost) {
-                        runtime::spawn_detached(async move {
-                            let _ = c.login().await;
-                        });
-                    }
                     self.load_live(ctx, svc.settings, Some(svc.audio), &id);
                 }
                 _ => ctx.request_repaint_after(Duration::from_millis(200)),
@@ -424,9 +453,15 @@ Retrying every 15 seconds.", e.root_cause());
     /// MQTT commands, window-visibility pausing, keep-awake, event sounds from status blocks.
     fn housekeeping(&mut self, ctx: &egui::Context, svc: &mut Services) {
         // MQTT client lifecycle follows settings.
+        // The restart waits until the settings have been stable for a second, so typing a broker URL or password
+        // does not open a connection per keystroke.
         let key = crate::mqtt::Mqtt::config_key(svc.settings);
         if key != self.mqtt_key {
             self.mqtt_key = key;
+            self.mqtt_changed_at = Some(Instant::now());
+        }
+        if self.mqtt_changed_at.is_some_and(|t| t.elapsed() >= Duration::from_secs(1)) {
+            self.mqtt_changed_at = None;
             self.mqtt = None;
             match crate::mqtt::Mqtt::start(svc.settings, ctx) {
                 Ok(m) => self.mqtt = m,
@@ -465,6 +500,8 @@ Retrying every 15 seconds.", e.root_cause());
                     };
                     svc.toasts.add(lvl, msg, timeout_ms.unwrap_or(10_000));
                 }
+                Status { connected: true, msg } => svc.toasts.success(msg),
+                Status { connected: false, msg } => svc.toasts.warn(msg),
             }
         }
         let live_id = self.current_live_id().map(str::to_string);
@@ -550,7 +587,8 @@ Retrying every 15 seconds.", e.root_cause());
             _ => None,
         };
         match (want, self.grid.group.clone()) {
-            (Some(w), Some(g)) if w.eq_ignore_ascii_case(&g) => {}
+            // Still the same group with the same members and stream options.
+            (Some(w), Some(g)) if w.eq_ignore_ascii_case(&g) && self.camera(&w).is_some_and(|c| self.grid.is_current(c, svc.settings)) => {}
             (Some(w), _) => {
                 let group = self.camera(&w).cloned().unwrap();
                 let cams = self.cameras.clone();
@@ -563,7 +601,7 @@ Retrying every 15 seconds.", e.root_cause());
     }
 
     /// Returns true when the user logged out.
-    pub fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame, svc: &mut Services) -> bool {
+    pub fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame, svc: &mut Services) -> bool {
         let ctx = ui.ctx().clone();
         crate::views::style::sync_theme(&ctx, &svc.settings.str("ui3_color_theme"), &self.session.login.version);
         self.poll_background(&ctx, svc);
@@ -594,7 +632,8 @@ Retrying every 15 seconds.", e.root_cause());
         egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::views::style::VIDEO_BG)).show(ui, |ui| {
             let area = ui.available_rect_before_wrap();
             if self.grid.is_active() {
-                self.grid.update(svc.gpu);
+                let client = self.client.clone();
+                self.grid.update(svc.gpu, &ctx, &client);
                 let cams = self.cameras.clone();
                 let (click, dbl, ctxm) = self.grid.show(ui, &cams, svc.settings.native.show_stats_overlay);
                 let input = crate::views::video::VideoInput { clicked: click.map(Some), double_clicked: dbl.map(Some), context_menu_camera: ctxm.map(Some) };
@@ -612,7 +651,16 @@ Retrying every 15 seconds.", e.root_cause());
             let mut resume = false;
             egui::Modal::new(egui::Id::new("idle")).show(&ctx, |ui| {
                 ui.heading("Paused due to inactivity");
-                ui.label(format!("Video stopped after {} minutes without input (Idle Timeout setting).", svc.settings.f64("ui3_timeout")));
+                // Timeouts under 30 s are raised to 30 s (see `housekeeping`).
+                let secs = (svc.settings.f64("ui3_timeout") * 60.0).max(30.0);
+                let after = if secs < 90.0 {
+                    format!("{secs:.0} seconds")
+                } else if (secs / 60.0).fract() == 0.0 {
+                    format!("{:.0} minutes", secs / 60.0)
+                } else {
+                    format!("{:.1} minutes", secs / 60.0)
+                };
+                ui.label(format!("Video stopped after {after} without input (Idle Timeout setting)."));
                 if ui.button("Resume").clicked() {
                     resume = true;
                 }
@@ -630,7 +678,6 @@ Retrying every 15 seconds.", e.root_cause());
             });
             return true;
         }
-        let _ = frame;
         false
     }
 
@@ -742,7 +789,7 @@ Retrying every 15 seconds.", e.root_cause());
                     let home = self.home_group.clone();
                     self.load_live(ctx, svc.settings, Some(svc.audio), &home);
                 }
-                self.clips.ensure_loaded(ctx, &self.client, svc.settings, &self.home_group)
+                self.clips.ensure_loaded(ctx, &self.client, &self.home_group)
             }
             Tab::Timeline => {
                 self.playback.close();
@@ -768,7 +815,19 @@ Retrying every 15 seconds.", e.root_cause());
         self.player.clear();
         self.grid.close(gpu);
         self.video.release(gpu);
-        self.clips.release(gpu);
+        self.clips.release();
+        // Stop holding the display awake once nothing is playing (logout or exit).
+        if std::mem::take(&mut self.keep_awake) {
+            use windows::Win32::System::Power::{ES_CONTINUOUS, SetThreadExecutionState};
+            unsafe {
+                SetThreadExecutionState(ES_CONTINUOUS);
+            }
+        }
+    }
+
+    /// A dialog or modal owns the keyboard: hotkeys must not act on the views behind it.
+    pub fn modal_open(&self) -> bool {
+        self.idle_timed_out || self.dialogs.blocks_hotkeys() || self.clips.modal_open() || self.ptz.editing_preset()
     }
 }
 

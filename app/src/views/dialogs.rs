@@ -5,7 +5,7 @@
 
 use crate::app::Services;
 use crate::runtime::{self, Pending};
-use crate::settings::{CATEGORIES, DEFS, Dv, Hotkey, Input, Settings};
+use crate::settings::{CATEGORIES, DEFS, Hotkey, Input, Settings};
 use crate::views::main_view::{Content, MainView};
 use crate::views::style;
 use crate::views::w;
@@ -52,8 +52,31 @@ pub struct Dialogs {
     client_export: Option<ClientExport>,
     camcfg: Option<(String, Value)>,
     camcfg_job: Option<Pending<Result<Value>>>,
+    /// Background server actions (camera toggles, profile changes...): each ends in a success or error toast.
     download_jobs: Vec<Pending<Result<String>>>,
-    pause_secs: i64,
+    /// File downloads in progress, shown together in one progress toast.
+    downloads: Vec<Download>,
+    /// A destructive action waiting for the user to confirm it.
+    confirm: Option<Confirm>,
+}
+
+struct Download {
+    name: String,
+    received: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    job: Pending<Result<String>>,
+}
+
+const DOWNLOAD_TOAST: &str = "downloads";
+
+struct Confirm {
+    text: String,
+    button: &'static str,
+    action: ConfirmAction,
+}
+
+enum ConfirmAction {
+    RebootServer,
+    Camera { id: String, change: CamConfig, done: &'static str },
 }
 
 impl Dialogs {
@@ -67,7 +90,19 @@ impl Dialogs {
         self.open.push(d);
     }
     pub fn close_top(&mut self) -> bool {
+        // A confirmation sits above every dialog; closing it cancels the action and leaves the dialogs alone.
+        if self.confirm.take().is_some() {
+            return true;
+        }
         self.open.pop().is_some()
+    }
+    /// A dialog, confirmation or hotkey capture is up: hotkeys must not reach the views behind it.
+    pub fn blocks_hotkeys(&self) -> bool {
+        !self.open.is_empty() || self.confirm.is_some() || self.capturing_hotkey.is_some()
+    }
+    /// The settings dialog is waiting for a key press to bind.
+    pub fn capturing_hotkey(&self) -> bool {
+        self.capturing_hotkey.is_some()
     }
 }
 
@@ -113,7 +148,7 @@ pub fn camera_menu(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services, c
         close_ctx_menu(&ctx);
     }
     if item(ui, crate::icons::SNAPSHOT, "Save Snapshot").clicked() {
-        save_snapshot_of(view, svc, &cam.id);
+        save_snapshot_of(view, &ctx, svc, &cam.id);
         close_ctx_menu(&ctx);
     }
     let admin = view.session.login.admin;
@@ -140,19 +175,33 @@ pub fn camera_menu(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services, c
             if svc.settings.bool("ui3_contextMenus_enableDisableCamera") {
                 let en = cam.is_enabled;
                 if item(ui, crate::icons::HOLD_PROFILE, if en { "Disable Camera" } else { "Enable Camera" }).clicked() {
-                    let (c, id) = (view.client.clone(), cam.id.clone());
-                    run_action(view, &ctx, if en { "Camera disabled" } else { "Camera enabled" }, async move { c.camconfig(&id, CamConfig::Enable(!en)).await.map(|_| ()) });
+                    if en {
+                        view.dialogs.confirm = Some(Confirm {
+                            text: format!("Disable camera \"{}\"?\n\nIt stops streaming and recording until it is enabled again.", cam.name),
+                            button: "Disable",
+                            action: ConfirmAction::Camera { id: cam.id.clone(), change: CamConfig::Enable(false), done: "Camera disabled" },
+                        });
+                    } else {
+                        let (c, id) = (view.client.clone(), cam.id.clone());
+                        run_action(view, &ctx, "Camera enabled", async move { c.camconfig(&id, CamConfig::Enable(true)).await.map(|_| ()) });
+                    }
                     close_ctx_menu(&ctx);
                 }
             }
             if item(ui, crate::icons::RESTART, "Restart Camera").clicked() {
-                let (c, id) = (view.client.clone(), cam.id.clone());
-                run_action(view, &ctx, "Camera restart requested", async move { c.camconfig(&id, CamConfig::Reset).await.map(|_| ()) });
+                view.dialogs.confirm = Some(Confirm {
+                    text: format!("Restart camera \"{}\" in Blue Iris?\n\nIts video is interrupted while Blue Iris reconnects to it.", cam.name),
+                    button: "Restart",
+                    action: ConfirmAction::Camera { id: cam.id.clone(), change: CamConfig::Reset, done: "Camera restart requested" },
+                });
                 close_ctx_menu(&ctx);
             }
             if item(ui, crate::icons::LOGOUT, "Reboot Camera").clicked() {
-                let (c, id) = (view.client.clone(), cam.id.clone());
-                run_action(view, &ctx, "Camera reboot requested", async move { c.camconfig(&id, CamConfig::Reboot).await.map(|_| ()) });
+                view.dialogs.confirm = Some(Confirm {
+                    text: format!("Send a hard-reboot command to camera \"{}\"?\n\nThe physical camera restarts and is offline until it has booted. Not all cameras support this.", cam.name),
+                    button: "Reboot",
+                    action: ConfirmAction::Camera { id: cam.id.clone(), change: CamConfig::Reboot, done: "Camera reboot requested" },
+                });
                 close_ctx_menu(&ctx);
             }
             if item(ui, crate::icons::SETTINGS, "Properties").clicked() {
@@ -219,22 +268,24 @@ fn group_options_menu(view: &mut MainView, ui: &mut egui::Ui, svc: &mut Services
     });
 }
 
-fn run_action(view: &mut MainView, ctx: &egui::Context, ok_msg: &'static str, fut: impl std::future::Future<Output = Result<()>> + Send + 'static) {
+/// Runs a server action in the background. It ends in a success toast with `ok_msg` or an error toast, and the
+/// server status is refreshed afterwards.
+pub fn run_action(view: &mut MainView, ctx: &egui::Context, ok_msg: &'static str, fut: impl std::future::Future<Output = Result<()>> + Send + 'static) {
     view.dialogs.download_jobs.push(runtime::spawn(ctx, async move { fut.await.map(|_| ok_msg.to_string()) }));
 }
 
-pub fn save_snapshot(view: &mut MainView, svc: &mut Services) {
+pub fn save_snapshot(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
     if save_local_snapshot(view, svc) {
         return;
     }
     match view.content.clone() {
-        Content::Live { id } | Content::Timeline { id } => save_snapshot_of(view, svc, &id),
+        Content::Live { id } | Content::Timeline { id } => save_snapshot_of(view, ctx, svc, &id),
         Content::Clip { .. } => {
             if let Some(c) = view.playback.clip.clone() {
                 let q = svc.settings.f64("ui3_download_snapshot_server_quality") as i32;
                 let path = bi_proto::urls::clip_snapshot(c.video_path(), view.playback.position_ms, q);
                 let name = format!("{}_{}.jpg", c.camera, chrono::Local::now().format("%Y%m%d_%H%M%S"));
-                start_download(view, path, name);
+                start_download(view, ctx, path, name);
             }
         }
         Content::None => {}
@@ -290,14 +341,14 @@ fn encode_snapshot(img: &bi_media::jpeg::RgbaImage, png: bool, quality: u8) -> a
     Ok(out)
 }
 
-fn save_snapshot_of(view: &mut MainView, svc: &mut Services, id: &str) {
+fn save_snapshot_of(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, id: &str) {
     let q = svc.settings.f64("ui3_download_snapshot_server_quality") as i32;
     let path = bi_proto::urls::live_snapshot(id, q, chrono::Utc::now().timestamp_millis());
     let name = format!("{}_{}.jpg", id, chrono::Local::now().format("%Y%m%d_%H%M%S"));
-    start_download(view, path, name);
+    start_download(view, ctx, path, name);
 }
 
-pub fn download_clips(view: &mut MainView, svc: &mut Services, items: Vec<ClipItem>) {
+pub fn download_clips(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, items: Vec<ClipItem>) {
     let original = svc.settings.bool("ui3_clipDownloadOriginalName");
     let h24 = svc.settings.bool("ui3_time24hour");
     let tz = view.session.login.tz_offset_ms();
@@ -311,25 +362,34 @@ pub fn download_clips(view: &mut MainView, svc: &mut Services, items: Vec<ClipIt
             .unwrap_or_default();
         let (url, name) = (bi_proto::urls::clip_download(&path, original), format!("{cam} {stamp}{ext}"));
         if original {
-            start_download_server_named(view, url, name);
+            start_download_server_named(view, ctx, url, name);
         } else {
-            start_download(view, url, name);
+            start_download(view, ctx, url, name);
         }
     }
 }
 
-/// Downloads `path`, asking for the destination only after the response arrives so that the server's own
+/// Opens the download request. Files are streamed to disk (clips can be gigabytes), never held in memory.
+async fn open_download(c: &bi_proto::BiClient, path: &str) -> Result<bi_proto::reqwest::Response> {
+    let resp = c.open_stream(path).await?;
+    anyhow::ensure!(resp.status().is_success(), "HTTP {}", resp.status().as_u16());
+    Ok(resp)
+}
+
+/// Downloads `path`, asking for the destination only after the response headers arrive so that the server's own
 /// `Content-Disposition` file name (from `original_name=1`) can be offered as the default.
-fn start_download_server_named(view: &mut MainView, path: String, fallback_name: String) {
+fn start_download_server_named(view: &mut MainView, ctx: &egui::Context, path: String, fallback_name: String) {
     let c = view.client.clone();
-    view.dialogs.download_jobs.push(runtime::spawn(&egui::Context::default(), async move {
-        let r = c.get_bytes(&path).await?;
-        anyhow::ensure!(r.status < 400, "HTTP {}", r.status);
-        let name = r.header("content-disposition").and_then(filename_from_disposition).unwrap_or(fallback_name);
+    let received = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let r2 = received.clone();
+    let job = runtime::spawn(ctx, async move {
+        let resp = open_download(&c, &path).await?;
+        let name = resp.headers().get("content-disposition").and_then(|v| v.to_str().ok()).and_then(filename_from_disposition).unwrap_or(fallback_name);
         let Some(dest) = rfd::AsyncFileDialog::new().set_file_name(&name).save_file().await else { return Ok("Download cancelled".to_string()) };
-        tokio::fs::write(dest.path(), &r.body).await?;
+        bi_proto::client::save_body(resp, dest.path(), &r2).await?;
         Ok(format!("Saved {}", dest.path().display()))
-    }));
+    });
+    view.dialogs.downloads.push(Download { name: "clip".to_string(), received, job });
 }
 
 fn filename_from_disposition(v: &str) -> Option<String> {
@@ -340,33 +400,126 @@ fn filename_from_disposition(v: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-fn start_download(view: &mut MainView, path: String, default_name: String) {
+fn start_download(view: &mut MainView, ctx: &egui::Context, path: String, default_name: String) {
     let Some(dest) = rfd::FileDialog::new().set_file_name(&default_name).save_file() else { return };
     let c = view.client.clone();
-    view.dialogs.download_jobs.push(runtime::spawn(&egui::Context::default(), async move {
-        let r = c.get_bytes(&path).await?;
-        anyhow::ensure!(r.status < 400, "HTTP {}", r.status);
-        tokio::fs::write(&dest, &r.body).await?;
+    let received = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let r2 = received.clone();
+    let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(default_name);
+    let job = runtime::spawn(ctx, async move {
+        let resp = open_download(&c, &path).await?;
+        bi_proto::client::save_body(resp, &dest, &r2).await?;
         Ok(format!("Saved {}", dest.display()))
-    }));
+    });
+    view.dialogs.downloads.push(Download { name, received, job });
 }
 
-pub fn show(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
-    // Background action results.
-    view.dialogs.download_jobs.retain_mut(|j| match j.poll() {
+/// Finished downloads become toasts; the ones still running share one progress toast.
+fn poll_downloads(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
+    view.dialogs.downloads.retain_mut(|dl| match dl.job.poll() {
         Some(Ok(m)) => {
             svc.toasts.success(m);
             false
         }
         Some(Err(e)) => {
-            svc.toasts.error(format!("{e:#}"));
+            svc.toasts.error(format!("Download failed: {e:#}"));
             false
         }
         None => true,
     });
-    if !view.dialogs.download_jobs.is_empty() {
-        ctx.request_repaint_after(Duration::from_millis(200));
+    let active = &view.dialogs.downloads;
+    if active.is_empty() {
+        svc.toasts.clear_sticky(DOWNLOAD_TOAST);
+        return;
     }
+    let bytes: u64 = active.iter().map(|dl| dl.received.load(std::sync::atomic::Ordering::Relaxed)).sum();
+    let what = if active.len() == 1 { active[0].name.clone() } else { format!("{} files", active.len()) };
+    svc.toasts.set_progress(DOWNLOAD_TOAST, format!("Downloading {what}\n{:.1} MB received", bytes as f64 / 1_048_576.0));
+    ctx.request_repaint_after(Duration::from_millis(250));
+}
+
+/// Results of the server-side export command and of a client-side export. Polled here rather than in the Export
+/// window so an export still reports back (and frees the Export button) after that window is closed.
+fn poll_exports(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
+    if let Some(j) = &mut view.dialogs.export_job
+        && let Some(r) = j.poll()
+    {
+        view.dialogs.export_job = None;
+        match r {
+            Ok(m) => {
+                svc.toasts.success(m);
+                view.dialogs.open(Dialog::ExportList);
+            }
+            Err(e) => svc.toasts.error(format!("Export command failed: {e:#}")),
+        }
+    }
+    if let Some(ce) = &mut view.dialogs.client_export {
+        ctx.request_repaint_after(Duration::from_millis(200));
+        if let Some(r) = ce.job.poll() {
+            view.dialogs.client_export = None;
+            match r {
+                Ok(m) => svc.toasts.success(m),
+                Err(e) => svc.toasts.error(format!("Export failed: {e:#}")),
+            }
+        }
+    }
+}
+
+/// The confirmation modal for destructive actions (`Dialogs::confirm`).
+fn confirm_modal(view: &mut MainView, ctx: &egui::Context) {
+    let Some(c) = &view.dialogs.confirm else { return };
+    let mut choice = None;
+    egui::Modal::new(egui::Id::new("confirm_action")).show(ctx, |ui| {
+        ui.set_max_width(420.0);
+        ui.label(&c.text);
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button(RichText::new(c.button).color(Color32::LIGHT_RED)).clicked() {
+                choice = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                choice = Some(false);
+            }
+        });
+    });
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        choice = Some(false);
+    }
+    let Some(yes) = choice else { return };
+    let Some(c) = view.dialogs.confirm.take() else { return };
+    if !yes {
+        return;
+    }
+    let client = view.client.clone();
+    match c.action {
+        ConfirmAction::RebootServer => run_action(view, ctx, "The server was instructed to reboot.", async move { client.reboot_server().await }),
+        ConfirmAction::Camera { id, change, done } => run_action(view, ctx, done, async move { client.camconfig(&id, change).await.map(|_| ()) }),
+    }
+}
+
+pub fn show(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
+    // Background action results.
+    let mut action_finished = false;
+    view.dialogs.download_jobs.retain_mut(|j| match j.poll() {
+        Some(Ok(m)) => {
+            svc.toasts.success(m);
+            action_finished = true;
+            false
+        }
+        Some(Err(e)) => {
+            svc.toasts.error(format!("{e:#}"));
+            action_finished = true;
+            false
+        }
+        None => true,
+    });
+    if action_finished {
+        // Profile, schedule, signal and camera changes show up in the status; fetch it now the server replied.
+        view.force_status_refresh();
+    }
+    poll_downloads(view, ctx, svc);
+    poll_exports(view, ctx, svc);
+    confirm_modal(view, ctx);
     // The right click that opens the menu must not also close it.
     let just_opened = view.dialogs.context_camera.is_some();
     if let Some(cam) = view.dialogs.context_camera.take() {
@@ -408,9 +561,9 @@ pub fn show(view: &mut MainView, ctx: &egui::Context, svc: &mut Services) {
             Dialog::SystemLog => json_window(view, ctx, "System Log", "log", &mut open),
             Dialog::UserList => json_window(view, ctx, "User List", "users", &mut open),
             Dialog::DeviceList => json_window(view, ctx, "Device List", "devices", &mut open),
-            Dialog::ExportList => export_list_window(view, ctx, svc, &mut open),
-            Dialog::ServerControl => server_control_window(view, ctx, svc, &mut open),
-            Dialog::UpdateCheck => json_window(view, ctx, "Blue Iris Updates", "updatecheck", &mut open),
+            Dialog::ExportList => export_list_window(view, ctx, &mut open),
+            Dialog::ServerControl => server_control_window(view, ctx, &mut open),
+            Dialog::UpdateCheck => updates_window(view, ctx, &mut open),
             Dialog::About => about_window(view, ctx, svc, &mut open),
             Dialog::ClipProperties(c) => clip_properties_window(view, ctx, svc, c, &mut open),
             Dialog::Export(c) => export_window(view, ctx, svc, ExportTarget::Clip(c.clone()), &mut open),
@@ -521,6 +674,8 @@ fn setting_row(ui: &mut egui::Ui, svc: &mut Services, d: &'static crate::setting
         }
         Input::Select(opts, dynamic) => {
             let cur = s.str(key);
+            // Menu items renamed for the native app keep working under their old stored names.
+            let cur = if dynamic == Some("getSystemNameButtonOptions") { crate::views::topbar::canonical_action(&cur).to_string() } else { cur };
             let options: Vec<String> = match dynamic {
                 Some("getBISoundOptions") => std::iter::once("None".to_string()).chain(sounds.iter().cloned()).collect(),
                 Some("getSystemNameButtonOptions") => crate::views::topbar::system_name_button_options(admin),
@@ -555,10 +710,17 @@ fn setting_row(ui: &mut egui::Ui, svc: &mut Services, d: &'static crate::setting
                 s.set(key, format!("#{:02X}{:02X}{:02X}", c.r(), c.g(), c.b()));
             }
         }
-        Input::Text | Input::Password => {
+        Input::Text => {
             let mut t = s.str(key);
-            if ui.add(egui::TextEdit::singleline(&mut t).password(matches!(d.input, Input::Password)).desired_width(260.0)).changed() {
+            if ui.add(egui::TextEdit::singleline(&mut t).desired_width(260.0)).changed() {
                 s.set(key, t);
+            }
+        }
+        Input::Password => {
+            let mut t = s.secret(key);
+            let r = ui.add(egui::TextEdit::singleline(&mut t).password(true).desired_width(260.0)).on_hover_text("Stored in Windows Credential Manager, not in the settings file.");
+            if r.changed() {
+                s.set_secret(key, &t);
             }
         }
         Input::Hotkey => {
@@ -585,7 +747,6 @@ fn setting_row(ui: &mut egui::Ui, svc: &mut Services, d: &'static crate::setting
         }
         Input::Hidden | Input::Comment(_) => {}
     }
-    let _ = Dv::Num(0.0);
 }
 
 fn format_num(v: f64) -> String {
@@ -627,8 +788,8 @@ fn native_settings(ui: &mut egui::Ui, svc: &mut Services) {
         ui.label("Grid uses sub streams");
         changed |= ui.checkbox(&mut n.grid_use_substream, "").changed();
         ui.end_row();
-        ui.label("Scrub frame cache (frames)");
-        changed |= ui.add(egui::DragValue::new(&mut n.scrub_cache_frames).range(16..=4000)).changed();
+        ui.label("Scrub frame cache").on_hover_text("Memory used to keep decoded seek-preview frames, so scrubbing back over a region is instant. Applies after the next login.");
+        changed |= ui.add(egui::DragValue::new(&mut n.scrub_cache_mb).range(16..=4096).suffix(" MB")).changed();
         ui.end_row();
         ui.label("Timeline drag inertia").on_hover_text("Fling the timeline and it keeps coasting, slowing to a stop. Slow drags stop where you release. Click the timeline to catch it.");
         changed |= ui.checkbox(&mut n.timeline_inertia, "").changed();
@@ -865,7 +1026,12 @@ fn camera_properties_window(view: &mut MainView, ctx: &egui::Context, svc: &mut 
         view.dialogs.camcfg_job = None;
         match r {
             Ok(v) => view.dialogs.camcfg = Some((id.to_string(), v)),
-            Err(e) => svc.toasts.error(format!("camconfig: {e:#}")),
+            Err(e) => {
+                // Close instead of asking again on every frame.
+                svc.toasts.error(format!("Could not load the camera's properties: {e:#}"));
+                *open = false;
+                return;
+            }
         }
     }
     let name = view.camera(id).map(|c| c.name.clone()).unwrap_or_else(|| id.to_string());
@@ -967,7 +1133,6 @@ fn camera_pause_window(view: &mut MainView, ctx: &egui::Context, id: &str, open:
         });
     });
     if let Some(v) = act {
-        view.dialogs.pause_secs = v;
         let (c, cam) = (view.client.clone(), id.to_string());
         view.dialogs.download_jobs.push(runtime::spawn(ctx, async move {
             c.camconfig(&cam, CamConfig::Pause(v)).await?;
@@ -1010,7 +1175,7 @@ fn server_status_window(view: &mut MainView, ctx: &egui::Context, open: &mut boo
     });
 }
 
-/// Generic window that fetches a JSON command and shows the result as a table (log, users, devices, updatecheck).
+/// Generic window that fetches a JSON command and shows the result as a table (log, users, devices).
 fn json_window(view: &mut MainView, ctx: &egui::Context, title: &str, cmd: &str, open: &mut bool) {
     let fresh = view.dialogs.json_cache.get(cmd).is_some_and(|(_, t)| t.elapsed() < Duration::from_secs(10));
     if !fresh && view.dialogs.json_job.is_none() {
@@ -1036,41 +1201,65 @@ fn json_window(view: &mut MainView, ctx: &egui::Context, title: &str, cmd: &str,
 }
 
 fn json_table(ui: &mut egui::Ui, v: &Value, id: &str) {
-    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| match v {
-        Value::Array(rows) if rows.iter().all(|r| r.is_object()) && !rows.is_empty() => {
-            let mut cols: Vec<String> = Vec::new();
-            for r in rows {
-                for k in r.as_object().unwrap().keys() {
-                    if !cols.contains(k) {
-                        cols.push(k.clone());
-                    }
-                }
+    let Some(rows) = v.as_array().filter(|rows| !rows.is_empty() && rows.iter().all(|r| r.is_object())) else {
+        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+            ui.monospace(serde_json::to_string_pretty(v).unwrap_or_default());
+        });
+        return;
+    };
+    let mut cols: Vec<String> = Vec::new();
+    for r in rows {
+        for k in r.as_object().unwrap().keys() {
+            if !cols.contains(k) {
+                cols.push(k.clone());
             }
-            egui::Grid::new(id).striped(true).num_columns(cols.len()).spacing([12.0, 3.0]).show(ui, |ui| {
-                for c in &cols {
-                    ui.label(RichText::new(c).strong());
+        }
+    }
+    let cell = |v: &Value| -> String {
+        match v {
+            Value::String(s) => s.replace(['\r', '\n'], " "),
+            Value::Null => String::new(),
+            x => x.to_string(),
+        }
+    };
+    let chars = |v: &Value| -> usize {
+        match v {
+            Value::String(s) => s.chars().count(),
+            Value::Null => 0,
+            x => x.to_string().len(),
+        }
+    };
+    // Only the visible rows are laid out (a system log can have thousands), so each column gets a fixed width
+    // from its longest value; otherwise the columns would shift as rows scroll in and out.
+    const MAX_CHARS: usize = 140;
+    let widths: Vec<f32> = cols.iter().map(|c| rows.iter().map(|r| chars(&r[c])).max().unwrap_or(0).max(c.chars().count()).min(MAX_CHARS) as f32 * 7.5 + 8.0).collect();
+    let row_h = ui.text_style_height(&egui::TextStyle::Body) + 2.0;
+    ui.spacing_mut().item_spacing.y = 3.0;
+    egui::ScrollArea::both().auto_shrink([false, false]).show_rows(ui, row_h, rows.len() + 1, |ui, range| {
+        egui::Grid::new(id).striped(true).num_columns(cols.len()).spacing([12.0, 3.0]).min_row_height(row_h).show(ui, |ui| {
+            for i in range {
+                for (c, w) in cols.iter().zip(&widths) {
+                    ui.allocate_ui_with_layout(egui::vec2(*w, row_h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_width(*w);
+                        if i == 0 {
+                            ui.add(egui::Label::new(RichText::new(c).strong()).truncate());
+                        } else {
+                            let text = cell(&rows[i - 1][c]);
+                            let long = text.chars().count() > MAX_CHARS;
+                            let r = ui.add(egui::Label::new(&text).truncate());
+                            if long {
+                                r.on_hover_text(text);
+                            }
+                        }
+                    });
                 }
                 ui.end_row();
-                for r in rows {
-                    for c in &cols {
-                        let cell = match &r[c] {
-                            Value::String(s) => s.clone(),
-                            Value::Null => String::new(),
-                            x => x.to_string(),
-                        };
-                        ui.label(cell);
-                    }
-                    ui.end_row();
-                }
-            });
-        }
-        other => {
-            ui.monospace(serde_json::to_string_pretty(other).unwrap_or_default());
-        }
+            }
+        });
     });
 }
 
-fn export_list_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, open: &mut bool) {
+fn export_list_window(view: &mut MainView, ctx: &egui::Context, open: &mut bool) {
     let fresh = view.dialogs.json_cache.get("export").is_some_and(|(_, t)| t.elapsed() < Duration::from_secs(4));
     if !fresh && view.dialogs.json_job.is_none() {
         let c = view.client.clone();
@@ -1141,13 +1330,12 @@ fn export_list_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Servic
         }));
     }
     if let Some((p, name)) = download {
-        start_download(view, bi_proto::urls::clip_download(&p, false), name);
+        start_download(view, ctx, bi_proto::urls::clip_download(&p, false), name);
     }
     ctx.request_repaint_after(Duration::from_secs(1));
-    let _ = svc;
 }
 
-fn server_control_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, open: &mut bool) {
+fn server_control_window(view: &mut MainView, ctx: &egui::Context, open: &mut bool) {
     // `ServerControl` (ui3.js:31720): sysconfig archive/schedule/manrecsec and reboot.
     let fresh = view.dialogs.json_cache.get("sysconfig").is_some_and(|(_, t)| t.elapsed() < Duration::from_secs(30));
     if !fresh && view.dialogs.json_job.is_none() {
@@ -1188,7 +1376,8 @@ fn server_control_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Ser
             });
         }
         ui.separator();
-        if ui.button(RichText::new("⏻ Restart Blue Iris server").color(Color32::LIGHT_RED)).clicked() {
+        // `status {reboot: true}` restarts the whole server computer, not just Blue Iris (ui3.js:31823).
+        if ui.button(RichText::new("⏻ Reboot server computer…").color(Color32::LIGHT_RED)).on_hover_text("Restarts the computer Blue Iris runs on. Asks for confirmation first.").clicked() {
             reboot = true;
         }
     });
@@ -1203,13 +1392,43 @@ fn server_control_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Ser
         }));
     }
     if reboot {
-        let c = view.client.clone();
-        view.dialogs.download_jobs.push(runtime::spawn(ctx, async move {
-            c.reboot_server().await?;
-            Ok("Blue Iris restart requested".to_string())
-        }));
+        let name = view.session.login.system_name.clone();
+        view.dialogs.confirm = Some(Confirm {
+            text: format!(
+                "Reboot the computer that runs Blue Iris (\"{name}\")?\n\nThis restarts the whole server computer, not just Blue Iris. If it fails to come back up for any reason, you may be unable to access the system. Windows updates may slow down or interfere with the reboot."
+            ),
+            button: "Reboot server computer",
+            action: ConfirmAction::RebootServer,
+        });
     }
-    let _ = svc;
+}
+
+/// Blue Iris version info from the login response. UI3 asks the server for `updatecheck`, but that command is only
+/// proposed and Blue Iris rejects it even for admins, so this shows UI3's no-data fallback (ui3.js:31925).
+fn updates_window(view: &mut MainView, ctx: &egui::Context, open: &mut bool) {
+    const CHANGELOG_URL: &str = "https://blueirissoftware.com/changelog6.pdf";
+    let l = &view.session.login;
+    w::window("Blue Iris Updates").open(open).collapsible(false).resizable(false).show(ctx, |ui| {
+        egui::Grid::new("bi_updates").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+            ui.label("Installed version");
+            ui.strong(if l.version.is_empty() { "unknown" } else { &l.version });
+            ui.end_row();
+            ui.label("Newest version");
+            match l.update_available() {
+                Some(v) => ui.strong(format!("{v} (update available)")),
+                None => ui.label("no newer version reported"),
+            };
+            ui.end_row();
+            if !l.support.is_empty() {
+                ui.label("Support and maintenance");
+                ui.label(&l.support);
+                ui.end_row();
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("This comes from the login response. Blue Iris refreshes the newest version about once a day; install updates from the Blue Iris console on the server.").weak());
+        ui.hyperlink_to("Blue Iris 6 changelog", CHANGELOG_URL);
+    });
 }
 
 fn about_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, open: &mut bool) {
@@ -1273,7 +1492,7 @@ fn clip_properties_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Se
             }
         });
         if ui.button("⬇ Download").clicked() {
-            download_clips(view, svc, vec![c.clone()]);
+            download_clips(view, ctx, svc, vec![c.clone()]);
         }
     });
 }
@@ -1307,6 +1526,7 @@ struct ExportOpts {
 struct ClientExport {
     job: Pending<Result<String>>,
     progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn export_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, target: ExportTarget, open: &mut bool) {
@@ -1329,7 +1549,13 @@ fn export_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, t
     let mut go = false;
     let title = if is_range { "Export timeline segment" } else { "Convert / Export clip" };
     w::window(title).open(open).collapsible(false).default_width(420.0).show(ctx, |ui| {
-        ui.checkbox(&mut opts.client_side, "Save the original stream directly (client-side MP4, keeps H.265, no re-encode)");
+        // Clip streams can pass the camera's own video through; timeline streams are always re-encoded by Blue Iris.
+        let client_label = if is_range {
+            "Save the stream directly as MP4 on this computer (Blue Iris re-encodes timeline video to H.264; no audio)"
+        } else {
+            "Save the original stream directly (client-side MP4, keeps H.265, no re-encode; no audio)"
+        };
+        ui.checkbox(&mut opts.client_side, client_label);
         ui.separator();
         ui.add_enabled_ui(!opts.client_side, |ui| {
             egui::Grid::new("exp").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
@@ -1395,6 +1621,11 @@ fn export_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, t
             if busy {
                 ui.spinner();
             }
+            if let Some(ce) = &view.dialogs.client_export
+                && ui.button("Cancel").on_hover_text("Stop the client-side export and delete the partial file").clicked()
+            {
+                ce.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         });
     });
     let opts = view.dialogs.export_opts.clone().unwrap();
@@ -1449,28 +1680,7 @@ fn export_window(view: &mut MainView, ctx: &egui::Context, svc: &mut Services, t
             }));
         }
     }
-    if let Some(j) = &mut view.dialogs.export_job
-        && let Some(r) = j.poll()
-    {
-        view.dialogs.export_job = None;
-        match r {
-            Ok(m) => {
-                svc.toasts.success(m);
-                view.dialogs.open(Dialog::ExportList);
-            }
-            Err(e) => svc.toasts.error(format!("Export command failed: {e:#}")),
-        }
-    }
-    if let Some(ce) = &mut view.dialogs.client_export {
-        ctx.request_repaint_after(Duration::from_millis(200));
-        if let Some(r) = ce.job.poll() {
-            view.dialogs.client_export = None;
-            match r {
-                Ok(m) => svc.toasts.success(m),
-                Err(e) => svc.toasts.error(format!("Export failed: {e:#}")),
-            }
-        }
-    }
+    // Results are collected by `poll_exports`, whether or not this window is still open.
 }
 
 trait PairOpt<T> {
@@ -1491,16 +1701,18 @@ fn start_client_export(view: &mut MainView, ctx: &egui::Context, target: &Export
     let path = match target {
         ExportTarget::Clip(c) => bi_proto::urls::clip_video(c.video_path(), bi_proto::urls::ClipStart::Time(start), 100, bi_proto::urls::AudioRequest::None, "&stream=0", "", ""),
         ExportTarget::Range { camera, start, .. } => {
-            bi_proto::urls::timeline_video(camera, view.client.opaque(), *start, 0, bi_proto::urls::AudioRequest::None, "&stream=0", "", 100, Some(false), "", "")
+            // Its own opaque: reusing one Blue Iris has seen replays frames from that session's old position.
+            bi_proto::urls::timeline_video(camera, &view.client.new_stream_opaque(), *start, 0, bi_proto::urls::AudioRequest::None, "&stream=0", "", 100, Some(false), "", "")
         }
     };
     // Request the original stream: direct-to-wire with both codecs accepted.
     let path = format!("{path}&d2w=1&vcs=3");
     let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let p2 = progress.clone();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (p2, c2) = (progress.clone(), cancel.clone());
     let c = view.client.clone();
-    let job = runtime::spawn(ctx, async move { crate::views::export::export_stream_to_mp4(c, path, dest, msec, p2).await });
-    view.dialogs.client_export = Some(ClientExport { job, progress });
+    let job = runtime::spawn(ctx, async move { crate::views::export::export_stream_to_mp4(c, path, dest, msec, p2, c2).await });
+    view.dialogs.client_export = Some(ClientExport { job, progress, cancel });
 }
 
 /// Dismisses the live-camera context menu (an `egui::Area`, so `ui.close()` has no effect on it).
